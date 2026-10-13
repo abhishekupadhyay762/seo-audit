@@ -126,8 +126,12 @@ def choose_and_check(inv: dict, settings: dict):
         if scope != "Every URL":
             per_section = c3.number_input("URLs per section", 1, 5000, 100, step=10, key=f"sm_per_{inv_id}",
                                           help="Picked evenly through each section, so old and new URLs are both covered.")
-        check_targets = st.checkbox("Check canonical and hreflang targets", value=True, key=f"sm_targets_{inv_id}",
+        t1, t2 = st.columns(2)
+        check_targets = t1.checkbox("Check canonical and hreflang targets", value=True, key=f"sm_targets_{inv_id}",
                                     help="Requests each canonical target and hreflang alternate that is not in the list.")
+        add_score = t2.checkbox("Add the on-page score", value=True, key=f"sm_score_{inv_id}",
+                                help="A score out of 100 for every page, from the same checks as the Page audit tool. "
+                                     "Turn off for very large sitemaps to finish faster.")
         selected = core.select_urls(urls, chosen or list(counts), include, exclude, int(per_section), settings["max_urls"])
         matching = len(core.select_urls(urls, chosen or list(counts), include, exclude, int(per_section), len(urls)))
         note = f"{len(selected):,} of {len(urls):,} listed URLs will be checked."
@@ -147,15 +151,20 @@ def choose_and_check(inv: dict, settings: dict):
         st.session_state["sm_total"] = len(selected)
         st.session_state["sm_info"] = {"Site": inv["origin"], **ui.run_info(settings)}
         st.session_state.pop("sm_final", None)
+        st.session_state["sm_extras"] = {"score": add_score}
         session = core.make_session(settings["workers"], settings["user_agent"])
-        ui.run_checks(selected, settings, results, robots, None, session, toast=False)
+        ui.run_checks(selected, settings, results, robots, ui.page_opts(add_score, "", settings, robots) or None,
+                      session, toast=False)
         if check_targets:
             ui.run_target_checks([results[i] for i in sorted(results)], settings, robots, session)
         st.toast("Check complete", icon="✅")
 
     if st.session_state.get("sm_results"):
-        df = ui.results_table("sm", core.SITEMAP_GROUPS, lambda rows: core.sitemap_extra(urls))
-        ui.render_results(df, "sm", core.SITEMAP_GROUPS, core.SITEMAP_OVERVIEW_COLS, st.session_state.get("sm_info", {}),
+        extras = st.session_state.get("sm_extras", {})
+        groups = core.with_extras(core.SITEMAP_GROUPS, **extras)
+        df = ui.results_table("sm", groups, lambda rows: core.sitemap_extra(urls))
+        ui.render_results(df, "sm", groups, ui.overview_cols(core.SITEMAP_OVERVIEW_COLS, extras),
+                          st.session_state.get("sm_info", {}),
                           "sitemap-audit", "Sitemap audit", [("Sitemap files", inv["files"])], site=inv["origin"],
                           report_sections=lambda: sitemap_report_sections(inv))
 

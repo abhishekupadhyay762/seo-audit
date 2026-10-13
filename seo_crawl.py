@@ -87,7 +87,7 @@ def not_crawled_row(url: str) -> dict:
 # The crawl
 # --------------------------------------------------------------------------
 def crawl_site(session, start: str, settings: dict, robots, max_pages: int, max_depth: int,
-               follow_robots: bool = True, skip_params: bool = True, on_progress=None) -> dict:
+               follow_robots: bool = True, skip_params: bool = True, on_progress=None, extra_opts: dict = None) -> dict:
     """Breadth-first crawl: the start page, then every page it links to, then the pages those link to...
 
     Returns a dict with
@@ -98,7 +98,7 @@ def crawl_site(session, start: str, settings: dict, robots, max_pages: int, max_
     """
     timeout, delay, workers = settings["timeout"], settings["delay"], settings["workers"]
     site = core.host_key(start)
-    opts = {"links": True}
+    opts = {**(extra_opts or {}), "links": True}
     seen = {crawl_key(start)}
     rows, by_key, links = [], {}, []
     inlinks, first_from = {}, {}
@@ -198,7 +198,8 @@ def crawl_site(session, start: str, settings: dict, robots, max_pages: int, max_
 # --------------------------------------------------------------------------
 # Crawl vs sitemap
 # --------------------------------------------------------------------------
-def compare_sitemap(session, crawl: dict, sitemap_urls: list, settings: dict, robots, on_progress=None) -> pd.DataFrame:
+def compare_sitemap(session, crawl: dict, sitemap_urls: list, settings: dict, robots, on_progress=None,
+                    opts: dict = None) -> pd.DataFrame:
     """Marks every crawled page as in / not in the sitemap, then checks the sitemap pages the crawl never reached.
 
     Adds those pages to crawl["rows"] (Crawl Depth empty, Inlinks 0) and returns the comparison table.
@@ -219,7 +220,7 @@ def compare_sitemap(session, crawl: dict, sitemap_urls: list, settings: dict, ro
     if missing:
         results = {}
         core.run_audit(missing, settings["workers"], settings["timeout"], settings["delay"], settings["user_agent"],
-                       results, on_progress or (lambda n, t: None), robots, None, session)
+                       results, on_progress or (lambda n, t: None), robots, opts, session)
         for i in sorted(results):
             r = results[i]
             r["Crawl Depth"], r["Inlinks"], r["Linked From"], r["In Sitemap"] = None, 0, "", "Yes"

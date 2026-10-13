@@ -470,7 +470,7 @@ def redirects_excel_bytes(df: pd.DataFrame, info: dict) -> bytes:
 # --------------------------------------------------------------------------
 COMPARE_FIELDS = ["Status Code", "Final URL", "Indexable", "Indexability Reason", "Robots.txt", "Meta Robots",
                   "Canonical URL", "Title", "Meta Description", "H1", "H1 Count", "Word Count", "Schema Types",
-                  "Severity"]
+                  "On-page Score", "Severity"]
 _DETAIL = re.compile(r"\s*\([^()]*\)\s*$")
 
 
@@ -502,6 +502,11 @@ def _issue_set(row) -> set:
 
 
 def _same(field, before, after) -> bool:
+    if field == "On-page Score":
+        try:
+            return abs(float(after or 0) - float(before or 0)) < 1
+        except ValueError:
+            return str(before).strip() == str(after).strip()
     if field == "Word Count":
         try:
             b, a = float(before or 0), float(after or 0)
@@ -557,6 +562,94 @@ def compare_runs(before: pd.DataFrame, after: pd.DataFrame) -> dict:
         "changes": pd.DataFrame(changes, columns=["URL", "Field", "Before", "After"]),
         "added": pd.DataFrame({"URL": added}), "removed": pd.DataFrame({"URL": removed}),
     }
+
+
+def is_page_audit(file) -> bool:
+    """True for an Excel file downloaded from the Page audit tool."""
+    if not file.name.lower().endswith(".xlsx"):
+        return False
+    try:
+        names = pd.ExcelFile(io.BytesIO(file.getvalue())).sheet_names
+    except Exception:
+        return False
+    return "Checklist" in names and "Areas" in names
+
+
+def load_page_audit(file) -> dict:
+    xl = pd.ExcelFile(io.BytesIO(file.getvalue()))
+    summary = xl.parse("Summary", header=None, dtype=str).fillna("")
+    kv = {}
+    for values in summary.itertuples(index=False):
+        if len(values) > 1 and str(values[0]).strip():
+            kv.setdefault(str(values[0]).strip(), str(values[1]).strip())
+    try:
+        score = int(float(kv.get("On-page score", "") or 0))
+    except ValueError:
+        score = 0
+    return {"url": kv.get("URL", ""), "keyword": kv.get("Keyword", ""), "score": score, "grade": kv.get("Grade", ""),
+            "areas": xl.parse("Areas", dtype=str).fillna(""), "checklist": xl.parse("Checklist", dtype=str).fillna("")}
+
+
+def _pts(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def compare_page_audits(before: dict, after: dict) -> dict:
+    """Score, areas and checks of two Page audit downloads of the same page."""
+    b_areas = {r["Area"]: r for r in before["areas"].to_dict("records")}
+    a_areas = {r["Area"]: r for r in after["areas"].to_dict("records")}
+    areas = []
+    for name in list(dict.fromkeys(list(b_areas) + list(a_areas))):
+        bv = _pts(b_areas[name]["Score (%)"]) if name in b_areas else None
+        av = _pts(a_areas[name]["Score (%)"]) if name in a_areas else None
+        areas.append({"Area": name, "Before (%)": None if bv is None else int(bv), "After (%)": None if av is None else int(av),
+                      "Change": None if bv is None or av is None else int(av - bv)})
+    key = lambda r: (r["Area"], r["Check"])
+    b_checks = {key(r): r for r in before["checklist"].to_dict("records")}
+    a_checks = {key(r): r for r in after["checklist"].to_dict("records")}
+    problem = {"Fail", "Warning"}
+    changed = []
+    for k in list(dict.fromkeys(list(b_checks) + list(a_checks))):
+        rb, ra = b_checks.get(k), a_checks.get(k)
+        res_b, res_a = (rb or {}).get("Result", "Not run"), (ra or {}).get("Result", "Not run")
+        pts_b, pts_a = _pts((rb or {}).get("Points")), _pts((ra or {}).get("Points"))
+        if res_b == res_a and abs(pts_a - pts_b) < 0.01 and (rb or {}).get("Found") == (ra or {}).get("Found"):
+            continue
+        if res_b in problem and res_a == "Pass":
+            what = "Fixed"
+        elif res_a in problem and res_b == "Pass":
+            what = "New problem"
+        elif pts_a > pts_b:
+            what = "Better"
+        elif pts_a < pts_b:
+            what = "Worse"
+        else:
+            what = "Changed"
+        changed.append({"Change": what, "Area": k[0], "Check": k[1], "Result Before": res_b, "Result After": res_a,
+                        "Found Before": (rb or {}).get("Found", ""), "Found After": (ra or {}).get("Found", ""),
+                        "Points Change": round(pts_a - pts_b, 2),
+                        "How To Fix": (ra or {}).get("How To Fix", "") if res_a in problem else ""})
+    order = {"New problem": 0, "Worse": 1, "Fixed": 2, "Better": 3, "Changed": 4}
+    changed.sort(key=lambda c: (order[c["Change"]], -abs(c["Points Change"])))
+    cols = ["Change", "Area", "Check", "Result Before", "Result After", "Found Before", "Found After", "Points Change",
+            "How To Fix"]
+    changes = pd.DataFrame(changed, columns=cols)
+    numbers = {"Score before": before["score"], "Score after": after["score"], "Change": after["score"] - before["score"],
+               "Checks fixed": int((changes["Change"] == "Fixed").sum()),
+               "New problems": int((changes["Change"] == "New problem").sum())}
+    area_df = pd.DataFrame(areas, columns=["Area", "Before (%)", "After (%)", "Change"])
+    for c in ("Before (%)", "After (%)", "Change"):
+        area_df[c] = pd.array(area_df[c].tolist(), dtype="Int64")
+    return {"numbers": numbers, "areas": area_df,
+            "changes": changes, "before": before, "after": after, "page_audit": True}
+
+
+def page_compare_excel(result: dict, info: dict) -> bytes:
+    return simple_excel("Page audit comparison", info, result["numbers"],
+                        [("Areas", result["areas"]), ("Changed checks", result["changes"])])
 
 
 def compare_excel_bytes(result: dict, info: dict) -> bytes:

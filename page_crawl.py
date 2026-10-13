@@ -24,6 +24,7 @@ COVERS = [
     ("Links to redirects", "Internal links that point at a redirect instead of the final URL."),
     ("Canonical and hreflang", "Whether canonical targets and hreflang alternates answer 200, are indexable and link back."),
     ("Full on-page data", "Title, meta description, headings, content, images, schema and issues for every page."),
+    ("On-page score", "A score out of 100 for every page, so you can fix the weakest pages first."),
 ]
 
 
@@ -58,13 +59,14 @@ def run_crawl(target: str, opts: dict, settings: dict):
         status.caption(f"Crawling: {n:,} pages checked, now {depth} click{'s' if depth != 1 else ''} from the start page "
                        f"({int(elapsed // 60)}m {int(elapsed % 60)}s)")
 
+    page_opts = ui.page_opts(opts["score"], "", settings, robots)
     result = crawl.crawl_site(session, start, settings, robots, opts["max_pages"], opts["max_depth"],
-                              opts["robots"], opts["skip_params"], on_crawl)
+                              opts["robots"], opts["skip_params"], on_crawl, page_opts)
     status.empty()
     comp = None
     if opts["sitemap"] and sitemap_urls:
         on_progress, done = ui.progress("Sitemap pages the crawl did not reach, checked")
-        comp = crawl.compare_sitemap(session, result, sitemap_urls, settings, robots, on_progress)
+        comp = crawl.compare_sitemap(session, result, sitemap_urls, settings, robots, on_progress, page_opts)
         done()
     rows = result["rows"]
     links_df = None
@@ -73,6 +75,7 @@ def run_crawl(target: str, opts: dict, settings: dict):
     if opts["targets"]:
         ui.run_target_checks(rows, settings, robots, session)
 
+    state["cr_extras"] = {"score": opts["score"]}
     state["cr_results"] = dict(enumerate(rows))
     state["cr_run_id"] = time.time()
     state["cr_total"] = len(rows)
@@ -143,10 +146,13 @@ def main():
             check_targets = o2.checkbox("Check canonical and hreflang targets", value=True)
             check_links = o3.checkbox("Check every link", value=True)
             external = o3.checkbox("Include external links", value=True)
+            add_score = o1.checkbox("Add the on-page score", value=True,
+                                    help="A score out of 100 for every page, from the same checks as the Page audit "
+                                         "tool. Turn off for very large sites to finish faster.")
     if go:
         run_crawl(target, {"max_pages": int(max_pages), "max_depth": int(max_depth), "robots": follow_robots,
                            "skip_params": skip_params, "sitemap": use_sitemap, "links": check_links,
-                           "external": external, "targets": check_targets}, settings)
+                           "external": external, "targets": check_targets, "score": add_score}, settings)
 
     state = st.session_state
     if not state.get("cr_results"):
@@ -164,12 +170,14 @@ def main():
         st.caption(f"Not crawled: {n_par:,} URL{'s' if n_par != 1 else ''} with parameters and "
                    f"{n_file:,} link{'s' if n_file != 1 else ''} to files such as images.")
 
-    df = ui.results_table("cr", core.CRAWL_GROUPS)
+    extras = state.get("cr_extras", {})
+    groups = core.with_extras(core.CRAWL_GROUPS, **extras)
+    df = ui.results_table("cr", groups)
     links_df, comp = state.get("cr_links"), state.get("cr_comp")
     tabs = st.tabs(["Pages", f"Links ({crawl.link_summary(links_df)['Broken']:,} broken)" if links_df is not None else "Links",
                     "Crawl versus sitemap"])
     with tabs[0]:
-        ui.render_results(df, "cr", core.CRAWL_GROUPS, core.CRAWL_OVERVIEW_COLS, state.get("cr_info", {}),
+        ui.render_results(df, "cr", groups, ui.overview_cols(core.CRAWL_OVERVIEW_COLS, extras), state.get("cr_info", {}),
                           "site-crawl", "Site crawl", site=meta.get("start", ""),
                           report_sections=lambda: report_sections(comp, links_df))
     with tabs[1]:

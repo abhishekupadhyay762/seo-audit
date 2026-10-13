@@ -26,6 +26,8 @@ COVERS = [
     ("Social and tags", "Open Graph title, description and image, Twitter card, lang, viewport and hreflang count."),
     ("Links", "Link counts, links with empty anchor text and, if you choose, every link's status (broken links, links to redirects)."),
     ("Canonical and hreflang", "Whether canonical targets and hreflang alternates answer 200, are indexable and link back."),
+    ("On-page score", "A score out of 100 for every page, from the same checks as the Page audit tool."),
+    ("Smartphone and desktop", "Optional: each page fetched as a phone and as a desktop, with what differs."),
     ("Issues", "Every finding graded Critical, Warning or Notice, with a summary you can filter by."),
 ]
 
@@ -45,6 +47,13 @@ def main():
         check_links = o2.checkbox("Check the links on these pages", value=False,
                                   help="Finds broken links and links to redirects. Adds one request per unique link.")
         external = o3.checkbox("Include external links", value=True, disabled=not check_links)
+        add_score = o1.checkbox("Add the on-page score", value=True,
+                                help="A score out of 100 for every page, from the same checks as the Page audit tool. "
+                                     "Turn off for very long lists to finish faster.")
+        mobile_label = o2.selectbox(
+            "Compare smartphone and desktop", list(ui.MOBILE_CHOICES),
+            help="Fetches every page two more times, as a phone and as a desktop, and lists what differs. "
+                 "Many sites block requests that claim to be Googlebot, so start with Chrome.")
         go = st.button("Check URLs", type="primary")
 
     if go:
@@ -68,9 +77,12 @@ def main():
             state["bulk_info"] = ui.run_info(settings)
             state.pop("bulk_final", None)
             state.pop("bulk_links", None)
+            mobile = ui.MOBILE_CHOICES[mobile_label]
+            state["bulk_extras"] = {"score": add_score, "mobile": bool(mobile)}
             session = core.make_session(settings["workers"], settings["user_agent"])
             robots = core.RobotsCache()
-            ui.run_checks(urls, settings, results, robots, {"links": check_links}, session, toast=False)
+            opts = {"links": check_links, **ui.page_opts(add_score, mobile, settings, robots)}
+            ui.run_checks(urls, settings, results, robots, opts, session, toast=False)
             rows = [results[i] for i in sorted(results)]
             if check_links:
                 state["bulk_links"] = ui.run_link_checks(rows, ui.links_from_rows(rows), settings, session, external)
@@ -83,14 +95,16 @@ def main():
         return
 
     state = st.session_state
-    df = ui.results_table("bulk")
+    extras = state.get("bulk_extras", {})
+    groups = core.with_extras(core.GROUPS, **extras)
+    df = ui.results_table("bulk", groups)
     hosts = {core.host_key(u) for u in df["URL"]}
     site = core.origin_of(df["URL"].iloc[0]) if len(hosts) == 1 else ""
     links_df = state.get("bulk_links")
     sections = (lambda: [s for s in [ui.broken_link_section(links_df)] if s]) if links_df is not None else None
 
     def pages():
-        ui.render_results(df, "bulk", core.GROUPS, core.OVERVIEW_COLS, state.get("bulk_info", {}),
+        ui.render_results(df, "bulk", groups, ui.overview_cols(core.OVERVIEW_COLS, extras), state.get("bulk_info", {}),
                           "bulk-url-check", "Bulk URL check", site=site, report_sections=sections)
     if links_df is None:
         pages()

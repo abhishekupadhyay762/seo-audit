@@ -1,9 +1,7 @@
 """
 SEO Audit Toolkit - engine (no screen code in this file)
 
-Used by both tools:
-  page_sitemap.py   Sitemap audit
-  page_bulk.py      Bulk URL check
+Used by every tool (page_*.py). Page audit extras live in seo_page.py, content tools in seo_content.py.
 
 What is in here
   1. Settings you can safely change (limits and thresholds)
@@ -60,6 +58,10 @@ USER_AGENTS = {
     "Chrome (desktop)": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+    ),
+    "Chrome (mobile)": (
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36"
     ),
     "Googlebot Smartphone": (
         "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 "
@@ -118,6 +120,32 @@ KEYWORD_GROUP = {
                 "In First 100 Words", "In H2s", "Keyword Count", "Keyword Density (%)"],
 }
 KEYWORD_GROUPS = {**KEYWORD_GROUP, **GROUPS}
+# Optional groups, added when the run asks for them (see with_extras)
+SCORE_GROUP = {"On-page Score": ["On-page Score", "Grade", "Weakest Area"]}
+MOBILE_GROUP = {"Smartphone vs Desktop": ["Mobile Match", "Mobile Differences"]}
+
+
+def with_extras(groups: dict, score: bool = False, mobile: bool = False) -> dict:
+    """The tool's groups plus the on-page score (after the tool's own first group) and the mobile comparison."""
+    names = list(groups)
+    lead = 1 if names and names[0] in ("Sitemap", "Crawl", "Keyword") else 0
+    out = {n: groups[n] for n in names[:lead]}
+    if score:
+        out.update(SCORE_GROUP)
+    out.update({n: groups[n] for n in names[lead:] if n != "Issues"})
+    if mobile:
+        out.update(MOBILE_GROUP)
+    if "Issues" in groups:
+        out["Issues"] = groups["Issues"]
+    return out
+
+
+def overview_with_score(cols: list, score: bool = False) -> list:
+    """Overview columns with the on-page score straight after the URL (and the sitemap section)."""
+    if not score:
+        return cols
+    at = cols.index("Section") + 1 if "Section" in cols else 1
+    return cols[:at] + ["On-page Score", "Grade"] + cols[at:]
 
 
 def all_cols(groups: dict) -> list:
@@ -149,6 +177,7 @@ INT_COLS = [
     "Nofollow Links", "Empty Anchor Links", "Issue Count",
     "Depth", "Times Listed", "Images in Sitemap", "Hreflang in Sitemap",
     "Canonical Target Status", "Broken Links", "Links To Redirects", "Crawl Depth", "Inlinks", "Keyword Count",
+    "On-page Score",
 ]
 FLOAT_COLS = ["HTML Size (KB)", "Keyword Density (%)"]
 NUM_COLS = set(INT_COLS) | set(FLOAT_COLS)
@@ -606,11 +635,17 @@ def _words(el) -> int:
     return len(el.get_text(" ").split())
 
 
-def word_counts(soup):
-    """Returns (main_content_words, full_page_words, main_text). Changes the soup - call it last."""
+BLOCK_MARK = "\u00b6"  # marks where a paragraph, heading, list item or cell ends (used for phrase counts)
+_BLOCK_TAGS = ["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "div", "td", "th", "dt", "dd", "blockquote",
+               "section", "article", "figcaption", "br", "tr", "button", "label"]
+
+
+def main_scope(soup):
+    """The main content element with the site chrome (menus, header, footer, sidebars) removed.
+    Returns (element or None, words on the whole page). Changes the soup."""
     body = soup.body
     if body is None:
-        return 0, 0, ""
+        return None, 0
     for t in body(["script", "style", "noscript", "template", "svg", "iframe"]):
         t.decompose()
     full = _words(body)
@@ -622,7 +657,6 @@ def word_counts(soup):
         scope = None  # an empty/misused <main>: fall back to the whole body
     if scope is None:
         scope = body
-    # Remove site chrome (menus, header, footer, sidebars) so only the page content is counted.
     # A tag nested inside one that was already removed is skipped (el.decomposed).
     for el in scope.find_all(["nav", "aside"]):
         if not el.decomposed:
@@ -637,8 +671,22 @@ def word_counts(soup):
     for el in scope.find_all(id=True):
         if not el.decomposed and str(el.get("id")).lower() in _CHROME_IDS:
             el.decompose()
-    text = clean(scope.get_text(" "))
-    return len(text.split()), full, text
+    return scope, full
+
+
+def word_counts(soup):
+    """Returns (main_content_words, full_page_words, main_text, marked_text). Changes the soup - call it last.
+
+    marked_text is main_text with BLOCK_MARK where each block ends, so phrases can be counted without
+    running from one heading or paragraph into the next."""
+    scope, full = main_scope(soup)
+    if scope is None:
+        return 0, 0, "", ""
+    for el in scope.find_all(_BLOCK_TAGS):
+        el.append(BLOCK_MARK)
+    marked = scope.get_text(" ")
+    text = clean(marked.replace(BLOCK_MARK, " "))
+    return len(text.split()), full, text, clean(marked)
 
 
 def js_shell_markers(soup) -> bool:
@@ -756,10 +804,12 @@ def extract(body: bytes, headers, final_url: str, row: dict, opts: dict = None):
 
     # --- Content (last: this step removes tags from the parsed page)
     shell = js_shell_markers(soup)
-    words_main, words_full, main_text = word_counts(soup)
+    words_main, words_full, main_text, marked_text = word_counts(soup)
     js_rendered = "Likely" if (words_full < 60 and shell) else "No"
     if opts.get("text"):
         x["main_text"] = main_text
+        if opts.get("keep_html"):
+            x["main_text_marked"] = marked_text  # only the page audit uses it
         x["h2s"] = h2s
 
     row.update({
@@ -853,6 +903,9 @@ def audit_url(session, url, timeout, delay, robots=None, opts=None):
     x["hop_codes"] = [c for _, c in hops]
     x["truncated"] = res["truncated"]
 
+    if opts and opts.get("keep_html"):  # the Page audit reads the page again for its details
+        x["html"] = res["body"]
+        x["headers"] = dict(headers)
     if fs == 200:
         if not is_html(headers.get("Content-Type", "")):
             x["non_html"] = True
@@ -865,6 +918,11 @@ def audit_url(session, url, timeout, delay, robots=None, opts=None):
             except Exception as e:
                 row["Fetch Error"] = f"Could not read the HTML ({e.__class__.__name__})"
     row["Indexable"], row["Indexability Reason"] = indexability(row)
+    if opts and opts.get("after"):  # extra work on the finished row (on-page score, mobile comparison)
+        try:
+            opts["after"](row)
+        except Exception:
+            pass
     return row
 
 
@@ -1097,13 +1155,18 @@ def issue_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def headline_numbers(df: pd.DataFrame) -> dict:
-    return {
+    out = {
         "URLs checked": len(df),
         "Indexable": int((df["Indexable"] == "Yes").sum()),
         "Non-indexable": int((df["Indexable"] == "No").sum()),
         "With critical issues": int((df["Severity"] == CRITICAL).sum()),
         "With warnings": int((df["Severity"] == WARNING).sum()),
     }
+    if "On-page Score" in df.columns:
+        scored = df.loc[(df["Final Status Code"] == 200) & (df["Redirect Hops"] == 0), "On-page Score"].dropna()
+        if len(scored):
+            out["Average on-page score"] = int(round(float(scored.mean())))
+    return out
 
 
 def status_split(df: pd.DataFrame) -> dict:
@@ -1134,7 +1197,8 @@ COL_WIDTHS = {
     "Warnings": 60, "Notices": 60, "Word Count (Full Page)": 20, "Robots.txt": 18,
     "Section": 22, "Sitemap File": 50, "Lastmod": 24, "Found Via": 34, "Problems": 60,
     "Type": 14, "Issues": 60, "Issue": 52, "Applies To": 16, "Images in Sitemap": 18,
-    "Hreflang in Sitemap": 20, "Share of URLs (%)": 18,
+    "Hreflang in Sitemap": 20, "Share of URLs (%)": 18, "Grade": 8, "Weakest Area": 26, "Mobile Match": 14,
+    "Mobile Differences": 40,
 }
 
 

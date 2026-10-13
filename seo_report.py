@@ -11,21 +11,33 @@ import re
 from datetime import date
 from urllib.parse import urlsplit
 
+import os
+
 import pandas as pd
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.opc.constants import RELATIONSHIP_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt, RGBColor
+from docx.shared import Cm, Pt, RGBColor
 
 import seo_core as core
 
 EXAMPLE_URLS = 10      # example URLs listed under each issue
 LINK_COLOR = "1A0DAB"
 
+# Branding on every Word report. Both can also be changed for one session under Report branding in the sidebar.
+AGENCY_NAME = ""                   # your agency name, e.g. "RocketTech"
+LOGO_FILE = "report_logo.png"      # put a PNG or JPG logo with this name next to this file
+
 # issue name (without the part in brackets) -> (why it matters, how to fix)
 ADVICE = {
+    # ---- smartphone vs desktop (Bulk URL check option)
+    "Smartphone and desktop versions differ": (
+        "Google indexes the smartphone version of a page. Anything missing or different there (title, headings, "
+        "content, links, tags) is what Google sees.",
+        "Serve the same title, meta description, headings, main content, links, canonical and robots tags to phones "
+        "and desktops. Check responsive templates and any separate mobile site or dynamic serving rules."),
     # ---- status, redirects, fetching
     "Blocked by robots.txt": (
         "Googlebot is not allowed to crawl this URL, so Google cannot read its content. A blocked page can still be "
@@ -438,6 +450,54 @@ def url_label(url: str, site: str = "") -> str:
     return "Homepage" if path == "/" else path
 
 
+def brand_defaults() -> dict:
+    """The agency name and logo set in this file (and the logo file next to it)."""
+    logo = b""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), LOGO_FILE)
+    try:
+        if os.path.isfile(path) and os.path.getsize(path) < 5_000_000:
+            with open(path, "rb") as f:
+                logo = f.read()
+    except OSError:
+        logo = b""
+    return {"agency": AGENCY_NAME, "client": "", "logo": logo}
+
+
+def apply_brand(doc, brand: dict = None):
+    """Logo and agency name in the page header, 'Prepared for ... by ...' in the footer, of a new report."""
+    brand = brand or {}
+    agency, client, logo = (brand.get("agency") or "").strip(), (brand.get("client") or "").strip(), brand.get("logo")
+    section = doc.sections[0]
+    if logo or agency:
+        p = section.header.paragraphs[0]
+        if logo:
+            try:
+                p.add_run().add_picture(io.BytesIO(logo), height=Cm(1.0))
+                if agency:
+                    p.add_run("   ")
+            except Exception:
+                pass  # not an image Word can show (for example WebP or SVG): leave the logo out
+        if agency:
+            run = p.add_run(agency)
+            run.bold = True
+            run.font.size = Pt(10)
+    if agency or client:
+        text = ("Prepared for " + client if client else "Prepared") + (" by " + agency if agency else "")
+        p = section.footer.paragraphs[0]
+        run = p.add_run(text)
+        run.font.size = Pt(8.5)
+        run.font.color.rgb = RGBColor(0x59, 0x59, 0x59)
+
+
+def brand_line(brand: dict = None) -> str:
+    """'Prepared for Client by Agency. ' for the line under a report title, or an empty string."""
+    brand = brand or {}
+    agency, client = (brand.get("agency") or "").strip(), (brand.get("client") or "").strip()
+    if not (agency or client):
+        return ""
+    return ("Prepared for " + client if client else "Prepared") + (" by " + agency if agency else "") + ". "
+
+
 def _label_value(doc, label: str, value: str):
     p = doc.add_paragraph()
     p.add_run(f"{label}: ").bold = True
@@ -448,11 +508,13 @@ def _label_value(doc, label: str, value: str):
 # --------------------------------------------------------------------------
 # The report
 # --------------------------------------------------------------------------
-def build_report(tool: str, site: str, info: dict, df: pd.DataFrame, extra_sections: list = None) -> bytes:
+def build_report(tool: str, site: str, info: dict, df: pd.DataFrame, extra_sections: list = None,
+                 brand: dict = None) -> bytes:
     """Word report for one run.
 
     df              the full results table (with the _issues column)
     extra_sections  optional [{"title", "intro", "header": [...], "rows": [[...], ...]}, ...]
+    brand           optional {"agency", "client", "logo" (image bytes)} for the header and footer
     """
     numbers = core.headline_numbers(df)
     split = core.status_split(df)
@@ -464,10 +526,11 @@ def build_report(tool: str, site: str, info: dict, df: pd.DataFrame, extra_secti
     normal.font.name = "Arial"
     normal.font.size = Pt(10.5)
 
+    apply_brand(doc, brand)
     doc.add_heading("SEO audit report", level=0)
     sub = doc.add_paragraph()
     host = urlsplit(site).netloc if site and "://" in site else site
-    sub.add_run(f"Website: {host or 'not recorded'}. Checked with the {tool.lower()} on "
+    sub.add_run(brand_line(brand) + f"Website: {host or 'not recorded'}. Checked with the {tool.lower()} on "
                 f"{date.today().strftime('%d %B %Y')}.").italic = True
 
     # ---- summary
