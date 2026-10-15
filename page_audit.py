@@ -55,7 +55,7 @@ def table_height(n: int, most: int = 420) -> int:
 # Running the audit
 # --------------------------------------------------------------------------
 def run(url: str, keyword: str, competitors: list, settings: dict, check_links: bool, check_targets: bool, mobile: str):
-    session = core.make_session(settings["workers"], settings["user_agent"])
+    session = ui.session(settings)
     pages = [url] + competitors
     with st.status(f"Auditing {url}", expanded=True) as status:
         audits = []
@@ -190,7 +190,7 @@ def competitors_tab(cmp: dict, comps: list):
 
 
 def page_data_tab(audit: dict):
-    df = audit["df"].drop(columns=["_issues"])
+    df = core.visible(audit["df"])
     data = pd.DataFrame({"Field": df.columns, "Value": ["" if pd.isna(v) else str(v) for v in df.iloc[0].tolist()]})
     st.dataframe(data, width="stretch", hide_index=True, height=560,
                  column_config={"Value": st.column_config.TextColumn(width="large")})
@@ -314,20 +314,22 @@ def main():
                  "Googlebot, so start with Chrome.")
         go = st.button("Audit page", type="primary")
 
-    if go:
-        url = core.normalize_url(raw_url) if core.looks_like_url(raw_url) else ""
-        if not url:
-            st.warning("Enter the full address of one page, for example https://example.com/services/seo")
-        else:
-            comps = []
-            for line in raw_comps.splitlines():
-                c = core.normalize_url(line) if core.looks_like_url(line) else ""
-                if c and core.norm_url(c) != core.norm_url(url) and c not in comps:
-                    comps.append(c)
-            if len(comps) > page.MAX_COMPETITORS:
-                st.info(f"Only the first {page.MAX_COMPETITORS} competitor URLs are audited.")
-                comps = comps[: page.MAX_COMPETITORS]
-            run(url, keyword.strip(), comps, settings, check_links, check_targets, MOBILE_MODES[mobile_label])
+    work = st.container()  # progress and messages go here, so the results below keep their place
+    with work:
+        if go:
+            url = core.normalize_url(raw_url) if core.looks_like_url(raw_url) else ""
+            if not url:
+                st.warning("Enter the full address of one page, for example https://example.com/services/seo")
+            else:
+                comps = []
+                for line in raw_comps.splitlines():
+                    c = core.normalize_url(line) if core.looks_like_url(line) else ""
+                    if c and core.norm_url(c) != core.norm_url(url) and c not in comps:
+                        comps.append(c)
+                if len(comps) > page.MAX_COMPETITORS:
+                    st.info(f"Only the first {page.MAX_COMPETITORS} competitor URLs are audited.")
+                    comps = comps[: page.MAX_COMPETITORS]
+                run(url, keyword.strip(), comps, settings, check_links, check_targets, MOBILE_MODES[mobile_label])
 
     state = st.session_state
     if not state.get("pa_audit"):

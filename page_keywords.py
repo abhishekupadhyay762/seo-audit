@@ -49,32 +49,34 @@ def main():
                                 help="CSV or XLSX with the URL in the first column and the keyword in the second.")
         go = st.button("Check keywords", type="primary")
 
-    if go:
-        try:
-            pairs = checks.parse_pairs(text, file)
-        except Exception as e:
-            st.error(f"The uploaded file could not be read: {e}")
-            pairs = []
-        pairs = [(u, k) for u, k in pairs if k][: settings["max_urls"]]
-        if not pairs:
-            st.warning("Add at least one line with a URL and a keyword, for example: https://example.com/page, my keyword")
-        else:
-            urls = list(dict.fromkeys(u for u, _ in pairs))
-            session = core.make_session(settings["workers"], settings["user_agent"])
-            fetched = {}
-            ui.run_checks(urls, settings, fetched, core.RobotsCache(), {"text": True}, session)
-            by_url = {r["URL"]: r for r in fetched.values()}
-            results = {}
-            for i, (url, keyword) in enumerate(pairs):
-                row = dict(by_url[url])
-                row["Target Keyword"] = keyword
-                results[i] = row
-            state = st.session_state
-            state["kw_results"] = results
-            state["kw_run_id"] = time.time()
-            state["kw_total"] = len(pairs)
-            state["kw_info"] = ui.run_info(settings)
-            state.pop("kw_final", None)
+    work = st.container()  # progress and messages go here, so the results below keep their place
+    with work:
+        if go:
+            try:
+                pairs = checks.parse_pairs(text, file)
+            except Exception as e:
+                st.error(f"The uploaded file could not be read: {e}")
+                pairs = []
+            pairs = [(u, k) for u, k in pairs if k][: settings["max_urls"]]
+            if not pairs:
+                st.warning("Add at least one line with a URL and a keyword, for example: https://example.com/page, my keyword")
+            else:
+                urls = list(dict.fromkeys(u for u, _ in pairs))
+                session = ui.session(settings)
+                fetched = {}
+                ui.run_checks(urls, settings, fetched, ui.robots(settings), {"text": True}, session)
+                by_url = {r["URL"]: r for r in fetched.values()}
+                results = {}
+                for i, (url, keyword) in enumerate(pairs):
+                    row = dict(by_url[url])
+                    row["Target Keyword"] = keyword
+                    results[i] = row
+                state = st.session_state
+                state["kw_results"] = results
+                state["kw_run_id"] = time.time()
+                state["kw_total"] = len(pairs)
+                state["kw_info"] = ui.run_info(settings)
+                state.pop("kw_final", None)
 
     if not st.session_state.get("kw_results"):
         ui.covers("What the check covers", COVERS)

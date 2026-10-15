@@ -94,33 +94,35 @@ def main():
                                     help="CSV or XLSX with the URL in the first column and, optionally, a keyword in the second.")
             go = st.button("Check pages", type="primary")
 
-    if go and mode == MODES[0]:
-        if len((text or "").split()) < 20:
-            st.warning("Paste at least a few sentences of text to check.")
-        else:
-            state["ct_text_result"] = content.analyze_text(text, (keyword or "").strip())
-            state["ct_text_id"] = time.time()
-    elif go:
-        try:
-            pairs = checks.parse_pairs(text, file)
-        except Exception as e:
-            st.error(f"The uploaded file could not be read: {e}")
-            pairs = []
-        keywords = {}
-        for url, kw in pairs:
-            keywords.setdefault(url, kw)
-        urls = list(keywords)[: settings["max_urls"]]
-        if not urls:
-            st.warning("Paste or upload at least one URL.")
-        else:
-            if len(keywords) > len(urls):
-                st.info(f"Only the first {len(urls):,} URLs are checked. Raise the limit in the sidebar to check more.")
-            results = {}
-            session = core.make_session(settings["workers"], settings["user_agent"])
-            ui.run_checks(urls, settings, results, core.RobotsCache(), content.content_hook(keywords), session)
-            state["ct_results"] = results
-            state["ct_run_id"] = time.time()
-            state["ct_info"] = ui.run_info(settings)
+    work = st.container()  # progress and messages go here, so the results below keep their place
+    with work:
+        if go and mode == MODES[0]:
+            if len((text or "").split()) < 20:
+                st.warning("Paste at least a few sentences of text to check.")
+            else:
+                state["ct_text_result"] = content.analyze_text(text, (keyword or "").strip())
+                state["ct_text_id"] = time.time()
+        elif go:
+            try:
+                pairs = checks.parse_pairs(text, file)
+            except Exception as e:
+                st.error(f"The uploaded file could not be read: {e}")
+                pairs = []
+            keywords = {}
+            for url, kw in pairs:
+                keywords.setdefault(url, kw)
+            urls = list(keywords)[: settings["max_urls"]]
+            if not urls:
+                st.warning("Paste or upload at least one URL.")
+            else:
+                if len(keywords) > len(urls):
+                    st.info(f"Only the first {len(urls):,} URLs are checked. Raise the limit in the sidebar to check more.")
+                results = {}
+                session = ui.session(settings)
+                ui.run_checks(urls, settings, results, ui.robots(settings), content.content_hook(keywords), session)
+                state["ct_results"] = results
+                state["ct_run_id"] = time.time()
+                state["ct_info"] = ui.run_info(settings)
 
     if mode == MODES[0]:
         if state.get("ct_text_result"):

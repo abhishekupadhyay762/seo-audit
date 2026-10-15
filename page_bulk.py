@@ -9,6 +9,7 @@ import streamlit as st
 
 import seo_core as core
 import seo_crawl as crawl
+import seo_tech as tech
 import seo_ui as ui
 
 DESCRIPTION = (
@@ -28,6 +29,8 @@ COVERS = [
     ("Canonical and hreflang", "Whether canonical targets and hreflang alternates answer 200, are indexable and link back."),
     ("On-page score", "A score out of 100 for every page, from the same checks as the Page audit tool."),
     ("Smartphone and desktop", "Optional: each page fetched as a phone and as a desktop, with what differs."),
+    ("Duplicate content", "Exact and near-duplicate pages in the list, and repeated titles, H1s and meta descriptions."),
+    ("Images and security", "Optional: broken and oversized images, http files on https pages, insecure forms."),
     ("Issues", "Every finding graded Critical, Warning or Notice, with a summary you can filter by."),
 ]
 
@@ -54,41 +57,48 @@ def main():
             "Compare smartphone and desktop", list(ui.MOBILE_CHOICES),
             help="Fetches every page two more times, as a phone and as a desktop, and lists what differs. "
                  "Many sites block requests that claim to be Googlebot, so start with Chrome.")
+        picked = ui.extra_checks([o1, o3, o3], "bulk")
         go = st.button("Check URLs", type="primary")
 
-    if go:
-        try:
-            urls = core.collect_inputs(text, file)
-        except Exception as e:
-            st.error(f"The uploaded file could not be read: {e}")
-            urls = []
-        if not urls:
-            st.warning("Paste or upload at least one URL, then choose Check URLs.")
-        else:
-            if len(urls) > settings["max_urls"]:
-                st.info(f"{len(urls):,} URLs given. The first {settings['max_urls']:,} will be checked. "
-                        "Raise the limit in the sidebar to check more.")
-                urls = urls[: settings["max_urls"]]
-            state = st.session_state
-            results = {}
-            state["bulk_results"] = results
-            state["bulk_run_id"] = time.time()
-            state["bulk_total"] = len(urls)
-            state["bulk_info"] = ui.run_info(settings)
-            state.pop("bulk_final", None)
-            state.pop("bulk_links", None)
-            mobile = ui.MOBILE_CHOICES[mobile_label]
-            state["bulk_extras"] = {"score": add_score, "mobile": bool(mobile)}
-            session = core.make_session(settings["workers"], settings["user_agent"])
-            robots = core.RobotsCache()
-            opts = {"links": check_links, **ui.page_opts(add_score, mobile, settings, robots)}
-            ui.run_checks(urls, settings, results, robots, opts, session, toast=False)
-            rows = [results[i] for i in sorted(results)]
-            if check_links:
-                state["bulk_links"] = ui.run_link_checks(rows, ui.links_from_rows(rows), settings, session, external)
-            if check_targets:
-                ui.run_target_checks(rows, settings, robots, session)
-            st.toast("Check complete", icon="✅")
+    work = st.container()  # progress and messages go here, so the results below keep their place
+    with work:
+        if go:
+            try:
+                urls = core.collect_inputs(text, file)
+            except Exception as e:
+                st.error(f"The uploaded file could not be read: {e}")
+                urls = []
+            if not urls:
+                st.warning("Paste or upload at least one URL, then choose Check URLs.")
+            else:
+                if len(urls) > settings["max_urls"]:
+                    st.info(f"{len(urls):,} URLs given. The first {settings['max_urls']:,} will be checked. "
+                            "Raise the limit in the sidebar to check more.")
+                    urls = urls[: settings["max_urls"]]
+                state = st.session_state
+                results = {}
+                state["bulk_results"] = results
+                state["bulk_run_id"] = time.time()
+                state["bulk_total"] = len(urls)
+                state["bulk_info"] = ui.run_info(settings)
+                state.pop("bulk_final", None)
+                state.pop("bulk_links", None)
+                state.pop("bulk_images", None)
+                state.pop("bulk_dup", None)
+                mobile = ui.MOBILE_CHOICES[mobile_label]
+                extras = {"score": add_score, "mobile": bool(mobile), **picked}
+                state["bulk_extras"] = extras
+                session = ui.session(settings)
+                robots = ui.robots(settings)
+                opts = core.merge_opts({"links": check_links}, ui.check_opts(extras, settings, robots, mobile))
+                ui.run_checks(urls, settings, results, robots, opts, session, toast=False)
+                rows = [results[i] for i in sorted(results)]
+                if check_links:
+                    state["bulk_links"] = ui.run_link_checks(rows, ui.links_from_rows(rows), settings, session, external)
+                if check_targets:
+                    ui.run_target_checks(rows, settings, robots, session)
+                state["bulk_dup"], state["bulk_images"] = ui.finish_checks(rows, settings, session, extras)
+                st.toast("Check complete", icon="✅")
 
     if not st.session_state.get("bulk_results"):
         ui.covers("What the report covers", COVERS)
@@ -100,20 +110,35 @@ def main():
     df = ui.results_table("bulk", groups)
     hosts = {core.host_key(u) for u in df["URL"]}
     site = core.origin_of(df["URL"].iloc[0]) if len(hosts) == 1 else ""
-    links_df = state.get("bulk_links")
-    sections = (lambda: [s for s in [ui.broken_link_section(links_df)] if s]) if links_df is not None else None
+    links_df, img_df, dup = state.get("bulk_links"), state.get("bulk_images"), state.get("bulk_dup")
+    info = state.get("bulk_info", {})
+
+    def sections():
+        return [s for s in [tech.duplicates_section(dup) if dup else {}, ui.broken_link_section(links_df),
+                            ui.image_section(img_df)] if s]
 
     def pages():
-        ui.render_results(df, "bulk", groups, ui.overview_cols(core.OVERVIEW_COLS, extras), state.get("bulk_info", {}),
+        ui.render_results(df, "bulk", groups, ui.overview_cols(core.OVERVIEW_COLS, extras), info,
                           "bulk-url-check", "Bulk URL check", site=site, report_sections=sections)
-    if links_df is None:
+    extra_tabs = []
+    if links_df is not None:
+        extra_tabs.append((f"Links ({crawl.link_summary(links_df)['Broken']:,} broken)",
+                           lambda: ui.links_view(links_df, "bulk", "bulk-url-check", info)))
+    if dup is not None:
+        extra_tabs.append((ui.dup_tab_label(dup),
+                           lambda: ui.duplicates_view(dup, "bulk", "bulk-url-check", info)))
+    if img_df is not None:
+        extra_tabs.append((f"Images ({crawl.image_summary(img_df)['Broken']:,} broken)",
+                           lambda: ui.images_view(img_df, "bulk", "bulk-url-check", info)))
+    if not extra_tabs:
         pages()
         return
-    tab_pages, tab_links = st.tabs(["Pages", f"Links ({crawl.link_summary(links_df)['Broken']:,} broken)"])
-    with tab_pages:
+    tabs = st.tabs(["Pages"] + [name for name, _ in extra_tabs])
+    with tabs[0]:
         pages()
-    with tab_links:
-        ui.links_view(links_df, "bulk", "bulk-url-check", state.get("bulk_info", {}))
+    for tab, (_, show) in zip(tabs[1:], extra_tabs):
+        with tab:
+            show()
 
 
 if __name__ == "__main__":

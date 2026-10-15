@@ -36,7 +36,7 @@ def parse_keywords(text: str) -> list:
 
 def run(target: str, keywords: list, source: str, url_text: str, include: str, exclude: str, settings: dict):
     state = st.session_state
-    session = core.make_session(settings["workers"], settings["user_agent"])
+    session = ui.session(settings)
     with st.spinner("Opening the target page..."):
         tgt = core.audit_url(session, target, settings["timeout"], 0, None, None)
     if tgt["Final Status Code"] is None:
@@ -79,7 +79,7 @@ def run(target: str, keywords: list, source: str, url_text: str, include: str, e
         return
 
     results = {}
-    ui.run_checks(urls, settings, results, robots or core.RobotsCache(), content.link_hook(target_keys, keywords), session)
+    ui.run_checks(urls, settings, results, robots or ui.robots(settings), content.link_hook(target_keys, keywords), session)
     rows = [results[i] for i in sorted(results)]
     state["lo_tables"] = content.link_tables(rows)
     state["lo_run_id"] = time.time()
@@ -152,14 +152,16 @@ def main():
         exclude = f2.text_input("Skip URLs containing", placeholder="/tag/, /author/")
         go = st.button("Find opportunities", type="primary")
 
-    if go:
-        url = core.normalize_url(target) if core.looks_like_url(target) else ""
-        if not url:
-            st.warning("Enter the full address of the page that should get the links.")
-        elif source == SOURCES[1] and not url_text.strip():
-            st.warning("Paste the URLs to scan, or choose the site's sitemap.")
-        else:
-            run(url, parse_keywords(kw_text), source, url_text, include, exclude, settings)
+    work = st.container()  # progress and messages go here, so the results below keep their place
+    with work:
+        if go:
+            url = core.normalize_url(target) if core.looks_like_url(target) else ""
+            if not url:
+                st.warning("Enter the full address of the page that should get the links.")
+            elif source == SOURCES[1] and not url_text.strip():
+                st.warning("Paste the URLs to scan, or choose the site's sitemap.")
+            else:
+                run(url, parse_keywords(kw_text), source, url_text, include, exclude, settings)
 
     if not st.session_state.get("lo_tables"):
         ui.covers("What the search covers", COVERS)

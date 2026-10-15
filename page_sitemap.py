@@ -9,7 +9,9 @@ import time
 import streamlit as st
 
 import seo_core as core
+import seo_crawl as crawl
 import seo_report as report
+import seo_tech as tech
 import seo_ui as ui
 
 DESCRIPTION = (
@@ -34,9 +36,9 @@ LINK = st.column_config.LinkColumn
 
 def find_urls(target: str, settings: dict):
     """Step 1: find the sitemap(s) and read them into the inventory."""
-    for key in ("sm_inv", "sm_disc", "sm_results", "sm_final"):
+    for key in ("sm_inv", "sm_disc", "sm_results", "sm_final", "sm_dup", "sm_images"):
         st.session_state.pop(key, None)
-    session = core.make_session(6, settings["user_agent"])
+    session = ui.session(settings, 6)
     with st.spinner("Looking for the sitemap..."):
         disc = core.discover_sitemaps(session, target, settings["timeout"])
     if disc["error"]:
@@ -132,6 +134,7 @@ def choose_and_check(inv: dict, settings: dict):
         add_score = t2.checkbox("Add the on-page score", value=True, key=f"sm_score_{inv_id}",
                                 help="A score out of 100 for every page, from the same checks as the Page audit tool. "
                                      "Turn off for very large sitemaps to finish faster.")
+        picked = ui.extra_checks([t1, t2, t1], f"sm_{inv_id}")
         selected = core.select_urls(urls, chosen or list(counts), include, exclude, int(per_section), settings["max_urls"])
         matching = len(core.select_urls(urls, chosen or list(counts), include, exclude, int(per_section), len(urls)))
         note = f"{len(selected):,} of {len(urls):,} listed URLs will be checked."
@@ -140,33 +143,58 @@ def choose_and_check(inv: dict, settings: dict):
         st.caption(note)
         go = st.button(f"Check {len(selected):,} pages", type="primary", disabled=not selected, key="sm_check")
 
-    if go:
-        disc = st.session_state.get("sm_disc", {})
-        robots = core.RobotsCache()
-        if disc.get("origin"):
-            robots.store(disc["origin"], disc["robots_status"], disc["robots_text"], disc["robots_error"])
-        results = {}
-        st.session_state["sm_results"] = results
-        st.session_state["sm_run_id"] = time.time()
-        st.session_state["sm_total"] = len(selected)
-        st.session_state["sm_info"] = {"Site": inv["origin"], **ui.run_info(settings)}
-        st.session_state.pop("sm_final", None)
-        st.session_state["sm_extras"] = {"score": add_score}
-        session = core.make_session(settings["workers"], settings["user_agent"])
-        ui.run_checks(selected, settings, results, robots, ui.page_opts(add_score, "", settings, robots) or None,
-                      session, toast=False)
-        if check_targets:
-            ui.run_target_checks([results[i] for i in sorted(results)], settings, robots, session)
-        st.toast("Check complete", icon="✅")
+    work = st.container()  # progress and messages go here, so the results below keep their place
+    with work:
+        if go:
+            disc = st.session_state.get("sm_disc", {})
+            robots = ui.robots(settings)
+            if disc.get("origin"):
+                robots.store(disc["origin"], disc["robots_status"], disc["robots_text"], disc["robots_error"])
+            results = {}
+            st.session_state["sm_results"] = results
+            st.session_state["sm_run_id"] = time.time()
+            st.session_state["sm_total"] = len(selected)
+            st.session_state["sm_info"] = {"Site": inv["origin"], **ui.run_info(settings)}
+            st.session_state.pop("sm_final", None)
+            extras = {"score": add_score, **picked}
+            st.session_state["sm_extras"] = extras
+            session = ui.session(settings)
+            ui.run_checks(selected, settings, results, robots, ui.check_opts(extras, settings, robots) or None,
+                          session, toast=False)
+            rows = [results[i] for i in sorted(results)]
+            if check_targets:
+                ui.run_target_checks(rows, settings, robots, session)
+            st.session_state["sm_dup"], st.session_state["sm_images"] = ui.finish_checks(rows, settings, session, extras)
+            st.toast("Check complete", icon="✅")
 
     if st.session_state.get("sm_results"):
         extras = st.session_state.get("sm_extras", {})
         groups = core.with_extras(core.SITEMAP_GROUPS, **extras)
         df = ui.results_table("sm", groups, lambda rows: core.sitemap_extra(urls))
-        ui.render_results(df, "sm", groups, ui.overview_cols(core.SITEMAP_OVERVIEW_COLS, extras),
-                          st.session_state.get("sm_info", {}),
-                          "sitemap-audit", "Sitemap audit", [("Sitemap files", inv["files"])], site=inv["origin"],
-                          report_sections=lambda: sitemap_report_sections(inv))
+        dup, img_df = st.session_state.get("sm_dup"), st.session_state.get("sm_images")
+        info = st.session_state.get("sm_info", {})
+
+        def pages():
+            ui.render_results(df, "sm", groups, ui.overview_cols(core.SITEMAP_OVERVIEW_COLS, extras), info,
+                              "sitemap-audit", "Sitemap audit", [("Sitemap files", inv["files"])], site=inv["origin"],
+                              report_sections=lambda: sitemap_report_sections(inv) + [
+                                  s for s in (tech.duplicates_section(dup) if dup else {}, ui.image_section(img_df)) if s])
+        extra_tabs = []
+        if dup is not None:
+            extra_tabs.append((ui.dup_tab_label(dup),
+                               lambda: ui.duplicates_view(dup, "sm", "sitemap-audit", info)))
+        if img_df is not None:
+            extra_tabs.append((f"Images ({crawl.image_summary(img_df)['Broken']:,} broken)",
+                               lambda: ui.images_view(img_df, "sm", "sitemap-audit", info)))
+        if not extra_tabs:
+            pages()
+            return
+        tabs = st.tabs(["Pages"] + [name for name, _ in extra_tabs])
+        with tabs[0]:
+            pages()
+        for tab, (_, show) in zip(tabs[1:], extra_tabs):
+            with tab:
+                show()
 
 
 def sitemap_report_sections(inv: dict) -> list:
@@ -190,8 +218,10 @@ def main():
             target = c1.text_input("Sitemap URL or domain",
                                    placeholder="example.com   or   https://example.com/sitemap.xml")
             go = c2.form_submit_button("Find URLs", type="primary", width="stretch")
-    if go:
-        find_urls(target, settings)
+    work = st.container()  # progress and messages go here, so the results below keep their place
+    with work:
+        if go:
+            find_urls(target, settings)
 
     inv = st.session_state.get("sm_inv")
     if not inv:

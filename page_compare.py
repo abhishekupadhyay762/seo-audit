@@ -62,22 +62,24 @@ def main():
         go = st.button("Compare", type="primary", disabled=not (before and after))
 
     state = st.session_state
-    if go:
-        try:
-            audits = (checks.is_page_audit(before), checks.is_page_audit(after))
-            if all(audits):
-                state["cmp_result"] = checks.compare_page_audits(checks.load_page_audit(before),
-                                                                 checks.load_page_audit(after))
-            elif any(audits):
-                raise ValueError("one file is a Page audit download and the other is not. Upload two Page audit "
-                                 "Excel files, or two downloads from the same other tool.")
-            else:
-                state["cmp_result"] = checks.compare_runs(checks.load_export(before), checks.load_export(after))
-            state["cmp_info"] = {"Before": before.name, "After": after.name}
-            state["cmp_id"] = time.time()
-        except Exception as e:
-            st.error(f"These files could not be compared: {e}")
-            state.pop("cmp_result", None)
+    work = st.container()  # progress and messages go here, so the results below keep their place
+    with work:
+        if go:
+            try:
+                audits = (checks.is_page_audit(before), checks.is_page_audit(after))
+                if all(audits):
+                    state["cmp_result"] = checks.compare_page_audits(checks.load_page_audit(before),
+                                                                     checks.load_page_audit(after))
+                elif any(audits):
+                    raise ValueError("one file is a Page audit download and the other is not. Upload two Page audit "
+                                     "Excel files, or two downloads from the same other tool.")
+                else:
+                    state["cmp_result"] = checks.compare_runs(checks.load_export(before), checks.load_export(after))
+                state["cmp_info"] = {"Before": before.name, "After": after.name}
+                state["cmp_id"] = time.time()
+            except Exception as e:
+                st.error(f"These files could not be compared: {e}")
+                state.pop("cmp_result", None)
 
     result = state.get("cmp_result")
     if result is None:

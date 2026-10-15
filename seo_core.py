@@ -17,13 +17,17 @@ What is in here
 import gzip
 import html
 import io
+import ipaddress
 import json
+import os
 import re
+import socket
 import threading
 import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
+from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import pandas as pd
@@ -52,6 +56,13 @@ MAX_INVENTORY_URLS = 200_000     # stop listing sitemap URLs after this many
 SITEMAP_URL_LIMIT = 50_000       # the standard allows 50,000 URLs per sitemap file
 SITEMAP_SIZE_LIMIT_MB = 50       # ... and 50 MB per file, uncompressed
 ROBOTS_AGENT = "googlebot"       # robots.txt rules are read the way this crawler reads them
+URL_MAX_CHARS = 115              # longer URLs -> "URL over 115 characters"
+IMAGES_PER_PAGE = 60             # most image addresses kept per page (image check and image sitemap)
+
+# Safety for the public app: never request private network addresses (localhost, 192.168.x.x, 10.x.x.x,
+# cloud server addresses). To audit a site on your own computer or office network, run the tool locally and
+# set this to False, or start it with the environment variable SEO_TOOL_ALLOW_PRIVATE=1.
+BLOCK_PRIVATE_ADDRESSES = os.environ.get("SEO_TOOL_ALLOW_PRIVATE", "") != "1"
 
 USER_AGENTS = {
     "Tool default": "Mozilla/5.0 (compatible; SEOMetaChecker/3.0)",
@@ -72,7 +83,21 @@ USER_AGENTS = {
         "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Googlebot/2.1; "
         "+http://www.google.com/bot.html) Chrome/141.0.0.0 Safari/537.36"
     ),
+    "Bingbot": (
+        "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; "
+        "+http://www.bing.com/bingbot.htm) Chrome/116.0.1938.76 Safari/537.36"
+    ),
+    "GPTBot (OpenAI)": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.4; +https://openai.com/gptbot)",
+    "OAI-SearchBot (ChatGPT search)": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 "
+        "Safari/537.36; compatible; OAI-SearchBot/1.4; +https://openai.com/searchbot"
+    ),
+    "ClaudeBot (Anthropic)": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0; +claudebot@anthropic.com)",
+    "PerplexityBot": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)",
 }
+# The robots.txt group each "Crawl as" choice follows (anything not listed reads robots.txt as Googlebot)
+ROBOTS_TOKENS = {"Bingbot": "bingbot", "GPTBot (OpenAI)": "gptbot", "OAI-SearchBot (ChatGPT search)": "oai-searchbot",
+                 "ClaudeBot (Anthropic)": "claudebot", "PerplexityBot": "perplexitybot"}
 BASE_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
@@ -90,6 +115,7 @@ GROUPS = {
     "Indexability": [
         "Indexable", "Indexability Reason", "Robots.txt", "Meta Robots", "X-Robots-Tag",
         "Canonical URL", "Canonical Status", "Canonical Count", "Canonical Target Status", "Canonical Target Note",
+        "Invalid Head Element",
     ],
     "Title & Meta": [
         "Title", "Title Length", "Title Pixels", "Duplicate Title",
@@ -112,7 +138,7 @@ SITEMAP_GROUP = {
 }
 SITEMAP_GROUPS = {**SITEMAP_GROUP, **GROUPS}
 # Extra group shown first in the Site crawl
-CRAWL_GROUP = {"Crawl": ["Crawl Depth", "Inlinks", "Linked From", "In Sitemap"]}
+CRAWL_GROUP = {"Crawl": ["Crawl Depth", "Inlinks", "Link Score", "Linked From", "In Sitemap"]}
 CRAWL_GROUPS = {**CRAWL_GROUP, **GROUPS}
 # Extra group shown first in the Keyword check
 KEYWORD_GROUP = {
@@ -123,18 +149,30 @@ KEYWORD_GROUPS = {**KEYWORD_GROUP, **GROUPS}
 # Optional groups, added when the run asks for them (see with_extras)
 SCORE_GROUP = {"On-page Score": ["On-page Score", "Grade", "Weakest Area"]}
 MOBILE_GROUP = {"Smartphone vs Desktop": ["Mobile Match", "Mobile Differences"]}
+SECURITY_GROUP = {"Security": ["Mixed Content", "Insecure Forms", "HSTS"]}
+DUPLICATE_GROUP = {"Duplicates": ["Exact Duplicates", "Near Duplicates", "Closest Match", "Similarity (%)"]}
+IMAGE_GROUP_EXTRA = ["Broken Images", "Large Images"]
 
 
-def with_extras(groups: dict, score: bool = False, mobile: bool = False) -> dict:
-    """The tool's groups plus the on-page score (after the tool's own first group) and the mobile comparison."""
+def with_extras(groups: dict, score: bool = False, mobile: bool = False, security: bool = False,
+                duplicates: bool = False, images: bool = False) -> dict:
+    """The tool's groups plus optional ones: the on-page score (after the tool's own first group), the
+    mobile comparison, security, duplicates, and the image check columns."""
     names = list(groups)
     lead = 1 if names and names[0] in ("Sitemap", "Crawl", "Keyword") else 0
     out = {n: groups[n] for n in names[:lead]}
     if score:
         out.update(SCORE_GROUP)
-    out.update({n: groups[n] for n in names[lead:] if n != "Issues"})
+    for n in names[lead:]:
+        if n == "Issues":
+            continue
+        out[n] = groups[n] + (IMAGE_GROUP_EXTRA if images and n == "Images" else [])
+    if duplicates:
+        out.update(DUPLICATE_GROUP)
     if mobile:
         out.update(MOBILE_GROUP)
+    if security:
+        out.update(SECURITY_GROUP)
     if "Issues" in groups:
         out["Issues"] = groups["Issues"]
     return out
@@ -177,7 +215,8 @@ INT_COLS = [
     "Nofollow Links", "Empty Anchor Links", "Issue Count",
     "Depth", "Times Listed", "Images in Sitemap", "Hreflang in Sitemap",
     "Canonical Target Status", "Broken Links", "Links To Redirects", "Crawl Depth", "Inlinks", "Keyword Count",
-    "On-page Score",
+    "On-page Score", "Mixed Content", "Insecure Forms", "Exact Duplicates", "Near Duplicates", "Similarity (%)",
+    "Broken Images", "Large Images", "Link Score",
 ]
 FLOAT_COLS = ["HTML Size (KB)", "Keyword Density (%)"]
 NUM_COLS = set(INT_COLS) | set(FLOAT_COLS)
@@ -266,17 +305,70 @@ def collect_inputs(text: str, file) -> list:
 # --------------------------------------------------------------------------
 # Fetching - redirects are followed one hop at a time so every hop is recorded
 # --------------------------------------------------------------------------
-def make_session(pool_size: int, user_agent: str) -> requests.Session:
+def parse_headers(text: str) -> dict:
+    """'Name: value' lines -> {name: value}. Lines without a colon are ignored."""
+    out = {}
+    for line in (text or "").splitlines():
+        if ":" in line:
+            name, value = line.split(":", 1)
+            if name.strip() and value.strip():
+                out[name.strip()] = value.strip()
+    return out
+
+
+class BlockedAddress(requests.exceptions.ConnectionError):
+    """The address points to a private network, which the public tool does not request."""
+
+
+_private_cache = {}
+
+
+def is_private_host(host: str) -> bool:
+    """True when the host is, or resolves to, a private, local or reserved address."""
+    host = (host or "").strip("[]").lower()
+    if host in _private_cache:
+        return _private_cache[host]
+    try:
+        ips = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            ips = [ipaddress.ip_address(a[4][0].split("%")[0]) for a in socket.getaddrinfo(host, None)]
+        except (socket.gaierror, UnicodeError, ValueError):
+            return False  # the request itself reports the address as not found
+    private = any(not ip.is_global or ip.is_multicast
+                  or (ip.version == 6 and ip.ipv4_mapped is not None and not ip.ipv4_mapped.is_global)
+                  for ip in ips)
+    if len(_private_cache) > 5000:
+        _private_cache.clear()
+    _private_cache[host] = private
+    return private
+
+
+class _SafeAdapter(HTTPAdapter):
+    def send(self, request, *args, **kwargs):
+        if BLOCK_PRIVATE_ADDRESSES and is_private_host(urlsplit(request.url).hostname):
+            raise BlockedAddress("Private network address (not requested)", request=request)
+        return super().send(request, *args, **kwargs)
+
+
+def make_session(pool_size: int, user_agent: str, headers: dict = None, auth=None) -> requests.Session:
+    """A session sending the chosen User-Agent, any extra headers (language, cookies) and an optional
+    HTTP login (user, password) for password-protected sites such as staging sites."""
     s = requests.Session()
     s.headers.update(BASE_HEADERS)
+    s.headers.update(headers or {})
     s.headers["User-Agent"] = user_agent
-    ad = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size)
+    if auth and auth[0]:
+        s.auth = (auth[0], auth[1] or "")
+    ad = _SafeAdapter(pool_connections=pool_size, pool_maxsize=pool_size)
     s.mount("http://", ad)
     s.mount("https://", ad)
     return s
 
 
 def error_label(e: Exception) -> str:
+    if isinstance(e, BlockedAddress):
+        return "Private network address, not checked"
     if isinstance(e, requests.exceptions.SSLError):
         return "SSL certificate error"
     if isinstance(e, requests.exceptions.Timeout):
@@ -297,7 +389,7 @@ def get_once(session, url, timeout, retries=2):
             r = session.get(url, timeout=timeout, stream=True, allow_redirects=False)
         except requests.RequestException as e:
             err = error_label(e)
-            if err == "Invalid URL" or (err == "Timeout" and attempt >= 1):
+            if err == "Invalid URL" or isinstance(e, BlockedAddress) or (err == "Timeout" and attempt >= 1):
                 break  # a second timeout is enough - do not wait a third time
             if attempt < retries:
                 time.sleep(1.0 * (attempt + 1))
@@ -702,10 +794,160 @@ def js_shell_markers(soup) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Elements that end the <head> early, URL problems, pagination
+# --------------------------------------------------------------------------
+_HEAD_OK = {"title", "meta", "link", "script", "style", "base", "noscript", "template"}
+_NOSCRIPT_OK = {"link", "meta", "style"}
+_HTML_SPACE = " \t\n\r\f"
+
+
+def _head_tag_label(tag: str, attrs: dict) -> str:
+    """A short name for the head tags Google reads, or '' for the rest."""
+    if tag == "title":
+        return "title"
+    if tag == "meta":
+        name = (attrs.get("name") or "").lower()
+        if name in ("robots", "googlebot"):
+            return "meta robots"
+        if name == "description":
+            return "meta description"
+        if name == "viewport":
+            return "viewport"
+    if tag == "link":
+        rel = (attrs.get("rel") or "").lower().split()
+        if "canonical" in rel:
+            return "canonical"
+        if "alternate" in rel and attrs.get("hreflang"):
+            return "hreflang"
+    return ""
+
+
+class _HeadScan(HTMLParser):
+    """Finds the first element or text that a browser (and Google) treats as the end of the <head>."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.bad, self.after = "", []
+        self.noscript = self.title = self.raw = False
+        self.template = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("html", "head"):
+            return
+        if self.template:
+            self.template += tag == "template"
+            return
+        if tag == "template":
+            self.template = 1
+            return
+        if not self.bad:
+            if self.noscript and tag not in _NOSCRIPT_OK:
+                self.bad = f"<{tag}> inside <noscript>"
+            elif not self.noscript and tag not in _HEAD_OK:
+                self.bad = f"<{tag}>"
+            self.noscript = self.noscript or tag == "noscript"
+            self.title = self.title or tag == "title"
+            self.raw = self.raw or tag in ("script", "style")
+        else:
+            label = _head_tag_label(tag, {k.lower(): (v or "") for k, v in attrs})
+            if label and label not in self.after:
+                self.after.append(label)
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag in ("script", "style", "title", "noscript"):
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        if tag == "template" and self.template:
+            self.template -= 1
+        elif tag == "noscript":
+            self.noscript = False
+        elif tag == "title":
+            self.title = False
+        elif tag in ("script", "style"):
+            self.raw = False
+
+    def handle_data(self, data):
+        if self.bad or self.template or self.title or self.raw:
+            return
+        text = data.strip(_HTML_SPACE)
+        if text:
+            if not text.strip("\xa0"):
+                self.bad = "a non-breaking space (&nbsp;)"
+            else:
+                self.bad = "the text \"" + text[:30] + ("..." if len(text) > 30 else "") + "\""
+
+
+def head_problem(html_text: str):
+    """(the first element or text that ends the <head> early, [head tags written after it]) or ("", []).
+
+    Only the part the author wrote as the head is read: up to </head>, or up to <body> when there is
+    no </head>. A page without either is skipped, because its head legitimately ends at the first
+    body element."""
+    m = re.search(r"</head\s*>|<body[\s>/]", html_text[:400_000], re.I)
+    if not m:
+        return "", []
+    start = re.search(r"<head[\s>]", html_text[: m.start()], re.I)
+    scan = _HeadScan()
+    try:
+        scan.feed(html_text[start.start() if start else 0: m.start()])
+        scan.close()
+    except Exception:
+        return "", []
+    return scan.bad, scan.after
+
+
+_REPEATED_FOLDER = re.compile(r"/([^/]+)/\1(/|$)", re.I)
+
+
+def url_problems(url: str) -> list:
+    """[(severity, issue name, row text), ...] for the address itself."""
+    try:
+        p = urlsplit(url)
+    except ValueError:
+        return []
+    out, path = [], p.path or "/"
+    if any(c.isupper() for c in path):
+        out.append((NOTICE, "Uppercase letters in URL"))
+    if "_" in path:
+        out.append((NOTICE, "Underscores in URL"))
+    if p.query:
+        out.append((NOTICE, "URL has parameters"))
+    if len(url) > URL_MAX_CHARS:
+        out.append((NOTICE, f"URL over {URL_MAX_CHARS} characters", f"URL over {URL_MAX_CHARS} characters ({len(url)})"))
+    if " " in url or any(ord(c) > 127 for c in url):
+        out.append((NOTICE, "Spaces or non-ASCII characters in URL"))
+    if "//" in path:
+        out.append((NOTICE, "Double slash in URL"))
+    if _REPEATED_FOLDER.search(path):
+        out.append((NOTICE, "Repeated folder in URL", f"Repeated folder in URL ({_REPEATED_FOLDER.search(path).group(0)})"))
+    return out
+
+
+_PAGE_PARAM = re.compile(r"(?:^|&)(?:page|p|pg|paged|pagenum|page_number)=(\d+)(?:&|$)", re.I)
+_PAGE_PATH = re.compile(r"/page/(\d+)/?$", re.I)
+
+
+def page_number(url: str):
+    """The page number of a paginated URL (?page=3, /page/3/), or None."""
+    try:
+        p = urlsplit(url)
+    except ValueError:
+        return None
+    m = _PAGE_PARAM.search(p.query or "") or _PAGE_PATH.search(p.path or "")
+    return int(m.group(1)) if m else None
+
+
+# --------------------------------------------------------------------------
 # One URL -> one row
 # --------------------------------------------------------------------------
+OPTIONAL_COLS = [c for g in (SCORE_GROUP, MOBILE_GROUP, SECURITY_GROUP, DUPLICATE_GROUP) for cols in g.values()
+                 for c in cols] + IMAGE_GROUP_EXTRA
+
+
 def blank_row(url: str) -> dict:
-    row = {c: (None if c in NUM_COLS else "") for c in ALL_COLS}
+    row = {c: (None if c in NUM_COLS else "") for c in ALL_COLS + OPTIONAL_COLS}
     row["URL"] = url
     row["_x"] = {}  # internal flags for the issue engine (not shown / exported)
     return row
@@ -725,6 +967,13 @@ def extract(body: bytes, headers, final_url: str, row: dict, opts: dict = None):
         charset = m.group(1)
     soup = BeautifulSoup(body, "lxml", from_encoding=charset)
     metas = meta_map(soup)
+    try:
+        text_html = body[:400_000].decode(charset or soup.original_encoding or "utf-8", "replace")
+    except LookupError:
+        text_html = body[:400_000].decode("utf-8", "replace")
+    bad, hidden = head_problem(text_html)
+    x["head_bad"], x["head_hidden"] = bad, hidden
+    head_note = (bad + ("; Google may ignore after it: " + ", ".join(hidden) if hidden else "")) if bad else ""
 
     base_tag = soup.find("base", href=True)
     try:
@@ -764,6 +1013,19 @@ def extract(body: bytes, headers, final_url: str, row: dict, opts: dict = None):
 
     # --- Images (fallback copies inside <noscript> are ignored)
     imgs = [i for i in soup.find_all("img") if i.find_parent("noscript") is None]
+    image_urls = []
+    for i in imgs:
+        src = (i.get("src") or i.get("data-src") or i.get("data-lazy-src")
+               or (i.get("srcset") or "").split(",")[0].strip().split(" ")[0]).strip()
+        if not src or src.startswith("data:") or len(image_urls) >= IMAGES_PER_PAGE:
+            continue
+        try:
+            u = urljoin(base_url, src)
+        except ValueError:
+            continue
+        if u.lower().startswith(("http://", "https://")):
+            image_urls.append((u, "Missing" if i.get("alt") is None else ("Empty" if not i.get("alt").strip() else "OK")))
+    x["images"] = image_urls
     alt_missing = sum(1 for i in imgs if i.get("alt") is None)
     alt_empty = sum(1 for i in imgs if i.get("alt") is not None and not i.get("alt").strip())
     no_dims = sum(1 for i in imgs if not (i.get("width") and i.get("height")))
@@ -791,6 +1053,32 @@ def extract(body: bytes, headers, final_url: str, row: dict, opts: dict = None):
             alternates.append((m.group(3), urljoin(final_url, m.group(1).strip())))
     x["hreflang"] = alternates
 
+    # --- Security (optional): http resources on an https page, forms that post to http, HSTS
+    if opts.get("security"):
+        secure = final_url.lower().startswith("https://")
+        mixed = 0
+        if secure:
+            for tag, attr in (("img", "src"), ("script", "src"), ("iframe", "src"), ("source", "src"),
+                              ("video", "src"), ("audio", "src"), ("embed", "src"), ("link", "href")):
+                for el in soup.find_all(tag):
+                    if tag == "link" and "stylesheet" not in [r.lower() for r in (el.get("rel") or [])]:
+                        continue
+                    if (el.get(attr) or "").strip().lower().startswith("http://"):
+                        mixed += 1
+        forms = 0
+        for f in soup.find_all("form"):
+            action = (f.get("action") or "").strip()
+            try:
+                target = urljoin(base_url, action) if action else final_url
+            except ValueError:
+                continue
+            if target.lower().startswith("http://"):
+                forms += 1
+        hsts = headers.get("Strict-Transport-Security", "") if secure else ""
+        row.update({"Mixed Content": mixed, "Insecure Forms": forms,
+                    "HSTS": ("Yes" if hsts else "Missing") if secure else "Not HTTPS"})
+        x["security"] = True
+
     # --- Links
     internal, external, nofollow, empty_anchor, links = link_counts(soup, base_url, final_url, bool(opts.get("links")))
     if opts.get("links"):
@@ -813,6 +1101,7 @@ def extract(body: bytes, headers, final_url: str, row: dict, opts: dict = None):
         x["h2s"] = h2s
 
     row.update({
+        "Invalid Head Element": head_note,
         "Meta Robots": meta_robots, "X-Robots-Tag": x_robots,
         "Canonical URL": canonical, "Canonical Status": can_status, "Canonical Count": can_count,
         "Title": title, "Title Length": len(title), "Title Pixels": pixel_width(title),
@@ -866,6 +1155,24 @@ def indexability(row: dict):
     if row["Canonical Status"] == "Different":
         return "No", "Canonicalised to another URL"
     return "Yes", ""
+
+
+def merge_opts(*options) -> dict:
+    """Combines page-check options: flags are switched on if any asks for them, and every 'after'
+    step runs in the order given."""
+    out, afters = {}, []
+    for o in options:
+        for k, v in (o or {}).items():
+            if k == "after":
+                afters.append(v)
+            else:
+                out[k] = out.get(k) or v
+    if afters:
+        def after(row):
+            for fn in afters:
+                fn(row)
+        out["after"] = after
+    return out
 
 
 def audit_url(session, url, timeout, delay, robots=None, opts=None):
@@ -1010,6 +1317,17 @@ def row_issues(r: dict, dup_title: bool, dup_meta: bool) -> list:
         add(WARNING, "Multiple canonical tags (conflicting)")
     if x.get("relative_canonical"):
         add(NOTICE, "Relative canonical URL")
+    if cs == "Different":
+        n = page_number(r["Final URL"] or r["URL"])
+        if n and n >= 2 and (page_number(r["Canonical URL"]) or 1) == 1:
+            add(WARNING, "Paginated page canonicalised to page 1")
+    if x.get("head_bad"):
+        hidden = x.get("head_hidden") or []
+        if any(h in ("canonical", "meta robots", "hreflang") for h in hidden):
+            add(WARNING, "Invalid element in <head> hides tags from Google",
+                f"Invalid element in <head> hides tags from Google ({x['head_bad']}, before: {', '.join(hidden)})")
+        else:
+            add(NOTICE, "Invalid element in <head>", f"Invalid element in <head> ({x['head_bad']})")
     if r["Final URL"].lower().startswith("http://"):
         add(WARNING, "Not HTTPS")
     if x.get("meta_refresh"):
@@ -1077,6 +1395,15 @@ def row_issues(r: dict, dup_title: bool, dup_meta: bool) -> list:
         add(NOTICE, "Links with empty anchor text", f"Links with empty anchor text ({r['Empty Anchor Links']})")
     if x.get("truncated"):
         add(NOTICE, "Very large HTML (only partly read)")
+    if x.get("security"):
+        if r["Mixed Content"]:
+            add(WARNING, "Mixed content (http files on an https page)", f"Mixed content ({r['Mixed Content']} http files)")
+        if r["Insecure Forms"]:
+            add(WARNING, "Form sends data over http", f"Form sends data over http ({r['Insecure Forms']})")
+        if r["HSTS"] == "Missing":
+            add(NOTICE, "HSTS header missing")
+    for issue in url_problems(r["URL"]):
+        add(*issue)
     return out
 
 
@@ -1138,7 +1465,13 @@ def finalize(rows: list, groups: dict = None, extra=None) -> pd.DataFrame:
         elif c in FLOAT_COLS:
             df[c] = pd.array(df[c].tolist(), dtype="Float64")
     df["_issues"] = names
+    df["_images"] = [[u for u, _ in r["_x"].get("images", [])] for r in rows]
     return df
+
+
+def visible(df: pd.DataFrame) -> pd.DataFrame:
+    """The table without the hidden working columns (their names start with _)."""
+    return df.drop(columns=[c for c in df.columns if str(c).startswith("_")])
 
 
 def issue_summary(df: pd.DataFrame) -> pd.DataFrame:
@@ -1198,7 +1531,12 @@ COL_WIDTHS = {
     "Section": 22, "Sitemap File": 50, "Lastmod": 24, "Found Via": 34, "Problems": 60,
     "Type": 14, "Issues": 60, "Issue": 52, "Applies To": 16, "Images in Sitemap": 18,
     "Hreflang in Sitemap": 20, "Share of URLs (%)": 18, "Grade": 8, "Weakest Area": 26, "Mobile Match": 14,
-    "Mobile Differences": 40,
+    "Mobile Differences": 40, "Check": 44, "What to do": 80, "Note": 50, "Field": 22, "Live": 45, "Staging": 45,
+    "Live URL": 50, "Staging URL": 50, "Result": 30, "Changed Fields": 40, "Live Title": 40, "Staging Title": 40,
+    "Value": 60, "Rule": 30, "Kind": 26, "Crawler": 20, "What It Does": 50, "Rules Followed": 24,
+    "Server Answer (homepage)": 34, "Page": 50, "Similar Page": 50, "Suggested Page To Keep": 50, "Action": 80,
+    "URLs": 80, "Text": 50, "Closest Match": 50, "Image": 55, "Example Page": 45, "Folder": 30, "Line": 80,
+    "Live Address After Launch": 50, "Invalid Head Element": 50,
 }
 
 
@@ -1331,7 +1669,7 @@ def fetch_raw(session, url, timeout, max_bytes=2_000_000, retries=1) -> dict:
             r = session.get(url, timeout=timeout, stream=True, allow_redirects=True)
         except requests.RequestException as e:
             out["error"] = error_label(e)
-            if attempt < retries and out["error"] != "Invalid URL":
+            if attempt < retries and out["error"] != "Invalid URL" and not isinstance(e, BlockedAddress):
                 time.sleep(1.0)
                 continue
             return out
@@ -1413,21 +1751,33 @@ class RobotsRules:
             self._compiled[pattern] = rx
         return rx
 
-    def allowed(self, url: str, agent: str = ROBOTS_AGENT) -> bool:
+    def group_for(self, agent: str) -> str:
+        """Which group a crawler follows: its own, the * group, or none."""
+        if any(agent in agents for agents, _ in self.groups):
+            return "Own group"
+        return "* group (all crawlers)" if any("*" in agents for agents, _ in self.groups) else "No group applies"
+
+    def match(self, url: str, agent: str = ROBOTS_AGENT):
+        """(allowed, the rule that decided as 'Allow: /x' or '' when no rule matched)."""
         try:
             p = urlsplit(url)
         except ValueError:
-            return True
+            return True, ""
         target = (p.path or "/") + (f"?{p.query}" if p.query else "")
         if target == "/robots.txt":
-            return True
-        best = None  # (pattern length, is_allow): the longest rule wins and Allow wins a tie
+            return True, ""
+        best = None  # (pattern length, is_allow, pattern): the longest rule wins and Allow wins a tie
         for is_allow, pattern in self.rules_for(agent):
             if self._regex(pattern).match(target):
-                key = (len(pattern), is_allow)
-                if best is None or key > best:
+                key = (len(pattern), is_allow, pattern)
+                if best is None or key[:2] > best[:2]:
                     best = key
-        return True if best is None else best[1]
+        if best is None:
+            return True, ""
+        return best[1], ("Allow: " if best[1] else "Disallow: ") + best[2]
+
+    def allowed(self, url: str, agent: str = ROBOTS_AGENT) -> bool:
+        return self.match(url, agent)[0]
 
 
 class RobotsCache:

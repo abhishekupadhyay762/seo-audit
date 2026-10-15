@@ -40,23 +40,25 @@ def main():
         go = st.button("Check redirects", type="primary")
 
     state = st.session_state
-    if go:
-        try:
-            pairs = checks.parse_pairs(text, file, second_is_url=True)
-        except Exception as e:
-            st.error(f"The uploaded file could not be read: {e}")
-            pairs = []
-        pairs = pairs[: settings["max_urls"]]
-        if not pairs:
-            st.warning("Add at least one old URL, ideally with the new URL it should redirect to.")
-        else:
-            session = core.make_session(settings["workers"], settings["user_agent"])
-            on_progress, done = ui.progress("Redirects checked")
-            state["rd_df"] = checks.check_redirects(session, pairs, settings, on_progress)
-            done()
-            state["rd_id"] = time.time()
-            state["rd_info"] = ui.run_info(settings)
-            st.toast("Check complete", icon="✅")
+    work = st.container()  # progress and messages go here, so the results below keep their place
+    with work:
+        if go:
+            try:
+                pairs = checks.parse_pairs(text, file, second_is_url=True)
+            except Exception as e:
+                st.error(f"The uploaded file could not be read: {e}")
+                pairs = []
+            pairs = pairs[: settings["max_urls"]]
+            if not pairs:
+                st.warning("Add at least one old URL, ideally with the new URL it should redirect to.")
+            else:
+                session = ui.session(settings)
+                on_progress, done = ui.progress("Redirects checked")
+                state["rd_df"] = checks.check_redirects(session, pairs, settings, on_progress)
+                done()
+                state["rd_id"] = time.time()
+                state["rd_info"] = ui.run_info(settings)
+                st.toast("Check complete", icon="✅")
 
     df = state.get("rd_df")
     if df is None:

@@ -1,12 +1,14 @@
 # SEO Audit Toolkit (Streamlit)
 
-One app, eleven tools (switch in the left sidebar).
+One app, sixteen tools (switch in the left sidebar).
 
 **Audit**
 1. **Sitemap audit** - enter a sitemap URL or a domain. Lists every URL in the sitemap, finds problems in
    the sitemap itself, then checks the pages you choose.
 2. **Site crawl** - starts at the homepage and follows internal links. Checks every page found, compares
-   the crawl with the sitemap (orphan pages, pages missing from the sitemap) and checks every link.
+   the crawl with the sitemap (orphan pages, pages missing from the sitemap), checks every link, and shows
+   the site structure: pages per folder and click depth, an internal link score for every page and a site
+   diagram. You can limit the crawl to URLs containing (or not containing) some text.
 3. **Bulk URL check** - paste or upload URLs. Status, redirects, indexability, title, meta, headings,
    content, images, schema, hreflang, links and issues for each URL. Options: check every link on the
    pages, and compare the smartphone and desktop versions of each page.
@@ -14,8 +16,15 @@ One app, eleven tools (switch in the left sidebar).
    what to fix first, a Google result preview, readability, content, schema fields, smartphone versus
    desktop and up to three competitors. Word report and Excel download.
 
-Sitemap audit, Site crawl and Bulk URL check also give every page an on-page score (same checks as Page
-audit, without the link checks), so you can sort a whole site and fix the weakest pages first.
+Sitemap audit, Site crawl and Bulk URL check also have:
+- an on-page score for every page (same checks as Page audit, without the link checks)
+- duplicate content: exact and near-duplicate pages, with the page to keep
+- optional image check (broken images, files over 200 KB, format) and security checks (http files on
+  https pages, forms that send data over http, HSTS)
+- checks for invalid elements in the head (which make Google ignore the canonical, meta robots or
+  hreflang after them), paginated pages canonicalised to page 1, and URL problems (uppercase,
+  underscores, long URLs, repeated folders)
+- results by section (folders, or your own sections), and XML sitemap options (lastmod, image sitemap)
 
 **Content**
 5. **Content check** - paste a draft (for example from Google Docs) or check many live pages: reading
@@ -26,19 +35,36 @@ audit, without the link checks), so you can sort a whole site and fix the weakes
    phrases to cover, suggested H2s, questions to answer, titles and schema. Downloads a content brief (Word).
 8. **Link opportunities** - the page that should rank plus its keywords. Finds pages on the site that
    mention a keyword but do not link to that page from their content, with the sentence to link from.
+9. **Duplicate content** - crawl the site, read the sitemap or paste URLs. Exact and near-duplicate pages
+   (you choose how similar), groups to fix with the page to keep, and repeated titles, H1s and metas.
 
 **Technical**
-9. **Schema check** - many URLs, every URL in a sitemap, or pasted code: each schema type with the
-   required and recommended fields it is missing, and broken JSON-LD with the line of the error.
-10. **Redirect check** - old URL plus expected new URL (a migration redirect map). Confirms each old URL
+10. **Schema check** - many URLs, every URL in a sitemap, or pasted code: each schema type with the
+    required and recommended fields it is missing, and broken JSON-LD with the line of the error.
+11. **Custom search** - search every page's source or visible text for anything (a missing GA4 or GTM
+    tag, an old phone number, lorem ipsum), and extract any element with a CSS selector, XPath or regex.
+12. **AI crawlers and robots.txt** - which search engines and AI crawlers (GPTBot, OAI-SearchBot,
+    ClaudeBot, PerplexityBot, Google-Extended and more) robots.txt lets in, what the server answers each
+    one, llms.txt, and a tester for a draft robots.txt. The sidebar's Crawl as list also has AI crawlers.
+13. **Redirect check** - old URL plus expected new URL (a migration redirect map). Confirms each old URL
     lands on the right page in one permanent redirect.
 
 **Compare**
-11. **Compare runs** - upload two downloads from this tool (before and after) to see fixed and new issues
+14. **Staging vs live** - before a redesign goes live: the same pages on the live and staging sites,
+    compared field by field, with a launch checklist (missing pages, noindex, robots.txt, staging links)
+    and a Word launch report. Works with password-protected staging sites.
+15. **Compare runs** - upload two downloads from this tool (before and after) to see fixed and new issues
     and score changes. Two Page audit Excel files show the score, area and check changes for one page.
+16. **Open a saved run** - open a CSV or Excel download again to filter it, or to download a new client
+    report or XML sitemap from it.
 
 Every audit tool can download CSV, Excel, a client report (Word, opens in Google Docs) and an XML
 sitemap of the indexable URLs it found.
+
+## Advanced settings in the sidebar
+
+Under **Advanced: headers and login** you can send extra request headers (for example Accept-Language
+or a cookie) and a user name and password for sites behind a browser login box, such as staging sites.
 
 ## Your agency branding on the Word reports
 
@@ -56,17 +82,23 @@ logo as `report_logo.png` in the tool's folder.
       page_competitors.py                     Competitor comparison screen
       page_links.py                           Link opportunities screen
       page_schema.py                          Schema check screen
+      page_duplicates.py                      Duplicate content screen
+      page_search.py                          Custom search screen
+      page_ai.py                              AI crawlers and robots.txt screen
+      page_staging.py                         Staging vs live screen
+      page_saved.py                           Open a saved run screen
       page_crawl.py                           Site crawl screen
       page_bulk.py                            Bulk URL check screen
       page_keywords.py                        Keyword check screen
       page_redirects.py                       Redirect check screen
       page_compare.py                         Compare runs screen
       seo_core.py                             fetching, page checks, issue rules, sitemap reading, exports
-      seo_crawl.py                            site crawl and link checks
+      seo_crawl.py                            site crawl, link checks and image checks
       seo_checks.py                           canonical / hreflang targets, keywords, redirects, compare, XML sitemap
       seo_report.py                           Word client report, branding and the advice text for every issue
       seo_page.py                             page audit: score, readability, content, schema fields, mobile vs desktop
       seo_content.py                          content check, schema check, competitor comparison, link opportunities
+      seo_tech.py                             duplicates, custom search, staging vs live, site structure, AI crawlers
       seo_ui.py                               look, sidebar and the results view
       requirements.txt
       report_logo.png                         optional: your logo for the Word reports
@@ -80,6 +112,15 @@ logo as `report_logo.png` in the tool's folder.
 
 The browser opens http://localhost:8501. After replacing files, stop the tool (Ctrl+C) and start it again.
 
+`requirements.txt` keeps Streamlit between 1.50 and 1.66, the versions the tool was tested with, so a new
+Streamlit release cannot change the tool without warning. Raise the limit only after testing the new version
+locally. The tool was tested on Python 3.10 to 3.13.
+
+For safety, the tool never requests private network addresses (localhost, 192.168.x.x, 10.x.x.x and
+cloud server addresses), so nobody can use the public app to look inside a private network. To audit a
+site running on your own computer or office network, run the tool locally and set
+`BLOCK_PRIVATE_ADDRESSES = False` at the top of `seo_core.py`.
+
 ## Put it live (Streamlit Community Cloud)
 
 Upload the same files and the `.streamlit` folder to the GitHub repo. The main file name is unchanged, so
@@ -91,4 +132,6 @@ the app redeploys by itself. If it shows an error after an update, open Manage a
 - Tool name: `APP_NAME` at the top of `seo_ui.py`
 - Advice text in the client report: `ADVICE` in `seo_report.py`
 - Limits and thresholds: the settings block at the top of `seo_core.py`, `seo_crawl.py` and `seo_checks.py`
+  (for example the 200 KB large-image limit in `seo_crawl.py` and the 115-character URL limit in `seo_core.py`)
 - Page audit score weights, grades and schema field rules: the top of `seo_page.py`
+- Duplicate threshold and link score: the top of `seo_tech.py`; the list of AI crawlers: `BOTS` in `seo_tech.py`

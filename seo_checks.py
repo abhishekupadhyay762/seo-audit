@@ -661,8 +661,11 @@ def compare_excel_bytes(result: dict, info: dict) -> bytes:
 # --------------------------------------------------------------------------
 # XML sitemap from the results
 # --------------------------------------------------------------------------
-def sitemap_urls(df: pd.DataFrame) -> list:
-    """[(url, lastmod)] for every indexable URL that answered 200 without a redirect."""
+def sitemap_urls(df: pd.DataFrame, lastmod: bool = True, images: bool = False) -> list:
+    """[(url, lastmod, [image urls])] for every indexable URL that answered 200 without a redirect.
+
+    lastmod  take the page's updated or published date (or the sitemap's lastmod) when there is one
+    images   add the images found on each page (an image sitemap)"""
     ok = df[(df["Indexable"] == "Yes") & (df["Final Status Code"] == 200) & (df["Redirect Hops"] == 0)]
     out, seen = [], set()
     for rec in ok.to_dict("records"):
@@ -670,28 +673,33 @@ def sitemap_urls(df: pd.DataFrame) -> list:
         if url in seen:
             continue
         seen.add(url)
-        lastmod = ""
-        for col in ("Updated", "Published", "Lastmod"):
-            v = str(rec.get(col) or "")[:10]
-            if v and core.lastmod_state(v) == "":
-                lastmod = v
-                break
-        out.append((url, lastmod))
+        date_ = ""
+        if lastmod:
+            for col in ("Updated", "Published", "Lastmod"):
+                v = str(rec.get(col) or "")[:10]
+                if v and core.lastmod_state(v) == "":
+                    date_ = v
+                    break
+        pics = list(dict.fromkeys(rec.get("_images") or []))[:1000] if images else []
+        out.append((url, date_, pics))
     return out
 
 
 def _urlset(entries) -> bytes:
+    with_images = any(e[2] for e in entries)
     rows = []
-    for url, lastmod in entries:
+    for url, lastmod, pics in entries:
         lm = f"<lastmod>{lastmod}</lastmod>" if lastmod else ""
-        rows.append(f"  <url><loc>{escape(url)}</loc>{lm}</url>")
-    return ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        imgs = "".join(f"<image:image><image:loc>{escape(i)}</image:loc></image:image>" for i in pics)
+        rows.append(f"  <url><loc>{escape(url)}</loc>{lm}{imgs}</url>")
+    ns = ' xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"' if with_images else ""
+    return (f'<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"{ns}>\n'
             + "\n".join(rows) + "\n</urlset>\n").encode("utf-8")
 
 
-def sitemap_xml(df: pd.DataFrame):
+def sitemap_xml(df: pd.DataFrame, lastmod: bool = True, images: bool = False):
     """Returns (file bytes, file name, mime type, URL count). Over 50,000 URLs: a zip with an index file."""
-    entries = sitemap_urls(df)
+    entries = sitemap_urls(df, lastmod, images)
     limit = core.SITEMAP_URL_LIMIT
     if len(entries) <= limit:
         return _urlset(entries), "sitemap.xml", "application/xml", len(entries)
@@ -708,3 +716,59 @@ def sitemap_xml(df: pd.DataFrame):
                  + "\n</sitemapindex>\n")
         z.writestr("sitemap_index.xml", index)
     return buf.getvalue(), "sitemaps.zip", "application/zip", len(entries)
+
+
+# --------------------------------------------------------------------------
+# Open a saved run (a CSV or Excel download from this tool) to view it again
+# --------------------------------------------------------------------------
+def _issue_name(text: str, names: list) -> str:
+    """The issue name behind the text shown on a row ("Images missing alt (2)" -> "Images missing alt attribute")."""
+    base = _DETAIL.sub("", text.strip())
+    for n in names:
+        if base == n:
+            return n
+    starts = [n for n in names if base.startswith(n)]
+    if starts:
+        return max(starts, key=len)
+    for n in names:
+        if n.startswith(base):
+            return n
+    return base
+
+
+def rebuild_run(raw: pd.DataFrame):
+    """A saved download turned back into a results table. Returns (df, groups, overview columns, tool name)."""
+    import seo_report as report
+    cols = set(raw.columns)
+    for need in ("Status Code", "Indexable", "Severity"):
+        if need not in cols:
+            raise ValueError("this file is not a page check download (no Status Code, Indexable or Severity column). "
+                             "Use a CSV or Excel file from Sitemap audit, Site crawl, Bulk URL check or Keyword check.")
+    if "Crawl Depth" in cols:
+        base, overview, tool = core.CRAWL_GROUPS, core.CRAWL_OVERVIEW_COLS, "Site crawl"
+    elif "Sitemap File" in cols:
+        base, overview, tool = core.SITEMAP_GROUPS, core.SITEMAP_OVERVIEW_COLS, "Sitemap audit"
+    elif "Target Keyword" in cols:
+        base, overview, tool = core.KEYWORD_GROUPS, core.KEYWORD_OVERVIEW_COLS, "Keyword check"
+    else:
+        base, overview, tool = core.GROUPS, core.OVERVIEW_COLS, "Bulk URL check"
+    extras = {"score": "On-page Score" in cols, "mobile": "Mobile Match" in cols, "security": "Mixed Content" in cols,
+              "duplicates": "Exact Duplicates" in cols, "images": "Broken Images" in cols}
+    groups = core.with_extras(base, **extras)
+    df = pd.DataFrame({c: (raw[c] if c in cols else "") for c in core.all_cols(groups)})
+    for c in df.columns:
+        if c in core.INT_COLS:
+            df[c] = pd.to_numeric(df[c].replace("", None), errors="coerce").round().astype("Int64")
+        elif c in core.FLOAT_COLS or c == "HTML Size (KB)":
+            df[c] = pd.to_numeric(df[c].replace("", None), errors="coerce").astype("Float64")
+        else:
+            df[c] = df[c].astype(str).replace({"nan": "", "<NA>": "", "None": ""})
+    names = list(report.ADVICE)
+    sev_cols = (("Critical", core.CRITICAL), ("Warnings", core.WARNING), ("Notices", core.NOTICE))
+    df["_issues"] = [[(sev, _issue_name(part, names)) for col, sev in sev_cols
+                      for part in str(r.get(col, "") or "").split("; ") if part.strip()]
+                     for r in raw.to_dict("records")]
+    df["_images"] = [[] for _ in range(len(df))]
+    sev = df["Severity"].astype(str)
+    df["Severity"] = sev.where(sev.isin(list(core.SEV_RANK)), "OK")
+    return df.reset_index(drop=True), groups, core.overview_with_score(overview, extras["score"]), tool

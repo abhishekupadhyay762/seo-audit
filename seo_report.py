@@ -38,6 +38,60 @@ ADVICE = {
         "content, links, tags) is what Google sees.",
         "Serve the same title, meta description, headings, main content, links, canonical and robots tags to phones "
         "and desktops. Check responsive templates and any separate mobile site or dynamic serving rules."),
+    # ---- crawl checks added with the technical tools
+    "Underscores in URL": (
+        "Google treats hyphens as word separators but may read words joined by underscores as one word.",
+        "Use hyphens in new URLs. Change existing URLs only when the gain is clear, with a 301 redirect from the old one."),
+    "URL over 115 characters": (
+        "Long URLs are cut off in search results and are hard to share, and they often carry unneeded folders or parameters.",
+        "Keep URLs short and descriptive. Shorten new URLs; change old ones only with a 301 redirect."),
+    "Spaces or non-ASCII characters in URL": (
+        "Spaces and non-English characters have to be encoded, so the URL looks different in links, analytics and reports.",
+        "Use lowercase letters, numbers and hyphens in URLs."),
+    "Double slash in URL": (
+        "A double slash usually comes from a template or link bug and creates a second address for the same page.",
+        "Fix the link or template that produces the double slash, and redirect the double-slash URL to the clean one."),
+    "Repeated folder in URL": (
+        "A repeated folder (such as /blog/blog/) usually comes from relative links and can create endless URL variations.",
+        "Use absolute or root-relative links (starting with /) and redirect the repeated-folder URLs."),
+    "Paginated page canonicalised to page 1": (
+        "When page 2, 3 and so on point their canonical at page 1, Google may not crawl or index the products or posts "
+        "listed only on the later pages.",
+        "Give every paginated page a self-referencing canonical tag, and keep normal links between the pages."),
+    "Invalid element in <head> hides tags from Google": (
+        "An element that does not belong in the head (such as an img, div or iframe, or stray text) ends the head early. "
+        "Google ignores the head tags after it, so the canonical, meta robots or hreflang tags listed are not read.",
+        "Move the element into the body, or move the SEO tags above it. Plugins and tracking codes added to the head are "
+        "the usual cause."),
+    "Invalid element in <head>": (
+        "An element that does not belong in the head ends it early. No SEO tags come after it on this page, but any "
+        "added later would be ignored.",
+        "Move the element into the body."),
+    "Mixed content (http files on an https page)": (
+        "Browsers block or warn about http scripts, styles and images on https pages, which can break the page and "
+        "show a not-secure warning.",
+        "Load every file over https: update the URLs in the template, theme or content."),
+    "Form sends data over http": (
+        "Form data sent over http can be read in transit, and browsers warn visitors before they submit it.",
+        "Point the form's action at an https URL."),
+    "HSTS header missing": (
+        "Without HSTS, a visitor's first request can still go over http before the redirect to https.",
+        "Add the Strict-Transport-Security header on the server or CDN, once every page and file works over https."),
+    "Broken images": (
+        "Images that do not load look broken to visitors and cannot appear in Google Images.",
+        "Fix or replace the image address, or remove the image from the page."),
+    "Large images": (
+        "Large image files slow the page down, especially on mobile, and hurt Largest Contentful Paint.",
+        "Resize images to the size they are shown at, compress them and serve WebP or AVIF."),
+    "Exact duplicate content": (
+        "Several indexable pages have the same main content. Google shows one of them and filters the rest, and links "
+        "and signals are split between the copies.",
+        "Keep one page. Redirect the copies to it with a 301, point their canonical at it, or rewrite them so each page "
+        "is useful on its own."),
+    "Near-duplicate content": (
+        "Pages that are almost the same (for example location pages with only the city name changed) compete with each "
+        "other and may be treated as low value.",
+        "Merge pages that serve the same need, or add content that is genuinely specific to each page."),
     # ---- status, redirects, fetching
     "Blocked by robots.txt": (
         "Googlebot is not allowed to crawl this URL, so Google cannot read its content. A blocked page can still be "

@@ -87,7 +87,8 @@ def not_crawled_row(url: str) -> dict:
 # The crawl
 # --------------------------------------------------------------------------
 def crawl_site(session, start: str, settings: dict, robots, max_pages: int, max_depth: int,
-               follow_robots: bool = True, skip_params: bool = True, on_progress=None, extra_opts: dict = None) -> dict:
+               follow_robots: bool = True, skip_params: bool = True, on_progress=None, extra_opts: dict = None,
+               include: list = None, exclude: list = None) -> dict:
     """Breadth-first crawl: the start page, then every page it links to, then the pages those link to...
 
     Returns a dict with
@@ -102,7 +103,9 @@ def crawl_site(session, start: str, settings: dict, robots, max_pages: int, max_
     seen = {crawl_key(start)}
     rows, by_key, links = [], {}, []
     inlinks, first_from = {}, {}
-    skipped = {"parameters": set(), "files": set()}
+    skipped = {"parameters": set(), "files": set(), "filtered": set()}
+    include = [p.lower() for p in include or [] if p]
+    exclude = [p.lower() for p in exclude or [] if p]
     level, depth, stopped = [start], 0, ""
     started = time.time()
 
@@ -116,6 +119,10 @@ def crawl_site(session, start: str, settings: dict, robots, max_pages: int, max_
             return False
         if skip_params and p.query:
             skipped["parameters"].add(crawl_key(url))
+            return False
+        low = url.lower()
+        if (include and not any(x in low for x in include)) or any(x in low for x in exclude):
+            skipped["filtered"].add(crawl_key(url))
             return False
         return True
 
@@ -355,6 +362,127 @@ def check_links(session, links: list, known_rows: list, settings: dict, check_ex
         if to_redirect:
             issues.append((core.NOTICE, "Internal links to redirects", f"Internal links to redirects ({to_redirect})"))
     return df
+
+
+# --------------------------------------------------------------------------
+# Images across the checked pages
+# --------------------------------------------------------------------------
+IMAGE_MAX_KB = 200            # images larger than this -> "Large images"
+MAX_IMAGE_CHECKS = 3000       # most image addresses to request in one run
+IMAGE_COLS = ["Image", "Result", "Status Code", "Size (KB)", "Format", "Pages Using It", "Alt Missing On",
+              "Example Page"]
+_FORMATS = {"image/jpeg": "JPEG", "image/jpg": "JPEG", "image/png": "PNG", "image/gif": "GIF", "image/webp": "WebP",
+            "image/avif": "AVIF", "image/svg+xml": "SVG", "image/x-icon": "ICO", "image/vnd.microsoft.icon": "ICO",
+            "image/bmp": "BMP", "image/tiff": "TIFF"}
+
+
+def _image_info(session, url: str, timeout) -> dict:
+    """Status, size and type of one image, without downloading it when the server says its size."""
+    out = {"status": None, "size": None, "ctype": "", "error": ""}
+    try:
+        r = session.get(url, timeout=timeout, stream=True, allow_redirects=True)
+    except Exception as e:
+        out["error"] = core.error_label(e)
+        return out
+    try:
+        out["status"] = r.status_code
+        out["ctype"] = (r.headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
+        length = r.headers.get("Content-Length")
+        if r.status_code == 200:
+            if length and length.isdigit() and not r.headers.get("Content-Encoding"):
+                out["size"] = int(length)
+            else:
+                total = 0
+                for chunk in r.iter_content(65536):
+                    total += len(chunk)
+                    if total > 20_000_000:
+                        break
+                out["size"] = total
+    except Exception as e:
+        out["error"] = core.error_label(e)
+    finally:
+        r.close()
+    return out
+
+
+def check_images(session, rows: list, settings: dict, on_progress=None) -> pd.DataFrame:
+    """Requests every image the checked pages use: broken images, large files, file format.
+    Adds Broken Images / Large Images (and their issues) to each page row."""
+    pages = {}  # image -> [pages using it, pages where it has no alt]
+    for r in rows:
+        for url, alt in r["_x"].get("images", []):
+            entry = pages.setdefault(url, [[], []])
+            source = r["Final URL"] or r["URL"]
+            if source not in entry[0]:
+                entry[0].append(source)
+            if alt == "Missing" and source not in entry[1]:
+                entry[1].append(source)
+    urls = list(pages)[:MAX_IMAGE_CHECKS]
+    timeout = min(settings["timeout"], LINK_TIMEOUT)
+    info = {}
+    with ThreadPoolExecutor(max_workers=settings["workers"]) as ex:
+        futures = {ex.submit(_image_info, session, u, timeout): u for u in urls}
+        for n, fut in enumerate(as_completed(futures), 1):
+            info[futures[fut]] = fut.result()
+            if on_progress and (n % 5 == 0 or n == len(futures)):
+                on_progress(n, len(futures))
+    out = []
+    for url, (used, no_alt) in pages.items():
+        i = info.get(url)
+        if i is None:
+            result, status, kb, fmt = "Not checked (limit reached)", None, None, ""
+        else:
+            status = i["status"]
+            kb = round(i["size"] / 1024, 1) if i["size"] is not None else None
+            fmt = _FORMATS.get(i["ctype"], i["ctype"] or "") if status == 200 else ""
+            if status is None:
+                result = f"Broken ({i['error'] or 'no answer'})"
+            elif status in UNVERIFIABLE_CODES:
+                result = f"Not verified ({status})"
+            elif status >= 400:
+                result = f"Broken ({status})"
+            elif i["ctype"] and not i["ctype"].startswith("image/"):
+                result = f"Not an image ({i['ctype']})"
+            elif kb is not None and kb > IMAGE_MAX_KB:
+                result = f"Large (over {IMAGE_MAX_KB} KB)"
+            else:
+                result = "OK"
+        out.append({"Image": url, "Result": result, "Status Code": status, "Size (KB)": kb, "Format": fmt,
+                    "Pages Using It": len(used), "Alt Missing On": len(no_alt), "Example Page": used[0] if used else "",
+                    "_pages": used})
+    df = pd.DataFrame(out, columns=IMAGE_COLS + ["_pages"])
+    df["Status Code"] = pd.array(df["Status Code"].tolist(), dtype="Int64")
+    df["Size (KB)"] = pd.array(df["Size (KB)"].tolist(), dtype="Float64")
+    df = df.sort_values(["Size (KB)"], ascending=False, na_position="last").reset_index(drop=True)
+
+    broken, large = {}, {}
+    for rec in out:
+        for page in rec["_pages"]:
+            if rec["Result"].startswith(("Broken", "Not an image")):
+                broken[page] = broken.get(page, 0) + 1
+            elif rec["Result"].startswith("Large"):
+                large[page] = large.get(page, 0) + 1
+    for r in rows:
+        if not r["_x"].get("parsed"):
+            continue
+        page = r["Final URL"] or r["URL"]
+        b, l = broken.get(page, 0), large.get(page, 0)
+        r["Broken Images"], r["Large Images"] = b, l
+        issues = r["_x"].setdefault("more_issues", [])
+        if b:
+            issues.append((core.WARNING, "Broken images", f"Broken images ({b})"))
+        if l:
+            issues.append((core.NOTICE, f"Large images (over {IMAGE_MAX_KB} KB)", f"Large images ({l})"))
+    return df
+
+
+def image_summary(df: pd.DataFrame) -> dict:
+    res = df["Result"]
+    return {"Images checked": int((~res.str.startswith("Not checked")).sum()),
+            "Broken": int(res.str.startswith(("Broken", "Not an image")).sum()),
+            f"Over {IMAGE_MAX_KB} KB": int(res.str.startswith("Large").sum()),
+            "Not WebP / AVIF / SVG": int((df["Format"].isin(["JPEG", "PNG", "GIF", "BMP", "TIFF"])).sum()),
+            "Used without alt": int((df["Alt Missing On"] > 0).sum())}
 
 
 def link_summary(df: pd.DataFrame) -> dict:

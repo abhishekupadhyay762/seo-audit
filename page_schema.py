@@ -43,8 +43,8 @@ def icons(df, col):
 def run_pages(urls: list, settings: dict, robots, info: dict):
     state = st.session_state
     results = {}
-    session = core.make_session(settings["workers"], settings["user_agent"])
-    ui.run_checks(urls, settings, results, robots or core.RobotsCache(), content.schema_hook(), session)
+    session = ui.session(settings)
+    ui.run_checks(urls, settings, results, robots or ui.robots(settings), content.schema_hook(), session)
     rows = [results[i] for i in sorted(results)]
     state["sc_tables"] = content.schema_tables(rows)
     state["sc_run_id"] = time.time()
@@ -147,34 +147,36 @@ def main():
             code = st.text_area("Paste JSON-LD, a <script> block or a page's HTML", height=260, placeholder=CODE_EXAMPLE)
             go = st.button("Check code", type="primary")
 
-    if go and mode == "Pages":
-        try:
-            urls = core.collect_inputs(text, file)
-        except Exception as e:
-            st.error(f"The uploaded file could not be read: {e}")
-            urls = []
-        if not urls:
-            st.warning("Paste or upload at least one URL.")
-        else:
-            if len(urls) > settings["max_urls"]:
-                st.info(f"The first {settings['max_urls']:,} of {len(urls):,} URLs are checked. Raise the limit in the sidebar to check more.")
-            run_pages(urls[: settings["max_urls"]], settings, None, {"Source": "URL list"})
-    elif go and mode == "Sitemap":
-        urls, note, robots = ui.urls_from_sitemap(target, settings, include, exclude)
-        if robots is None:
-            st.error(note)
-        elif not urls:
-            st.warning(note + " No URLs to check.")
-        else:
-            if len(urls) > settings["max_urls"]:
-                note += f" The first {settings['max_urls']:,} are checked; raise the limit in the sidebar to check more."
-            st.caption(note)
-            run_pages(urls[: settings["max_urls"]], settings, robots, {"Source": target.strip()})
-    elif go:
-        if not (code or "").strip():
-            st.warning("Paste some JSON-LD or HTML to check.")
-        else:
-            state["sc_code"] = content.check_code(code)
+    work = st.container()  # progress and messages go here, so the results below keep their place
+    with work:
+        if go and mode == "Pages":
+            try:
+                urls = core.collect_inputs(text, file)
+            except Exception as e:
+                st.error(f"The uploaded file could not be read: {e}")
+                urls = []
+            if not urls:
+                st.warning("Paste or upload at least one URL.")
+            else:
+                if len(urls) > settings["max_urls"]:
+                    st.info(f"The first {settings['max_urls']:,} of {len(urls):,} URLs are checked. Raise the limit in the sidebar to check more.")
+                run_pages(urls[: settings["max_urls"]], settings, None, {"Source": "URL list"})
+        elif go and mode == "Sitemap":
+            urls, note, robots = ui.urls_from_sitemap(target, settings, include, exclude)
+            if robots is None:
+                st.error(note)
+            elif not urls:
+                st.warning(note + " No URLs to check.")
+            else:
+                if len(urls) > settings["max_urls"]:
+                    note += f" The first {settings['max_urls']:,} are checked; raise the limit in the sidebar to check more."
+                st.caption(note)
+                run_pages(urls[: settings["max_urls"]], settings, robots, {"Source": target.strip()})
+        elif go:
+            if not (code or "").strip():
+                st.warning("Paste some JSON-LD or HTML to check.")
+            else:
+                state["sc_code"] = content.check_code(code)
 
     if mode == "Paste code":
         if state.get("sc_code"):

@@ -373,19 +373,21 @@ COMPARE_SIZE = ["Word Count", "Internal Links", "Images"]
 KEY_FIELDS = {"Status Code", "Final URL", "Indexable", "Title", "Meta Description", "H1", "Canonical URL", "Meta Robots"}
 
 
-def device_sessions(as_googlebot: bool, pool: int = 2) -> dict:
-    """One session per device, sending a smartphone or a desktop User-Agent."""
+def device_sessions(as_googlebot: bool, pool: int = 2, settings: dict = None) -> dict:
+    """One session per device, sending a smartphone or a desktop User-Agent (plus any extra headers and login)."""
     agents = ({"Smartphone": core.USER_AGENTS["Googlebot Smartphone"], "Desktop": core.USER_AGENTS["Googlebot Desktop"]}
               if as_googlebot else
               {"Smartphone": core.USER_AGENTS["Chrome (mobile)"], "Desktop": core.USER_AGENTS["Chrome (desktop)"]})
-    return {name: core.make_session(pool, agent) for name, agent in agents.items()}
+    settings = settings or {}
+    return {name: core.make_session(pool, agent, settings.get("headers"), settings.get("auth"))
+            for name, agent in agents.items()}
 
 
 def mobile_vs_desktop(url: str, settings: dict, robots, as_googlebot: bool = True, sessions: dict = None):
     """Fetches the page as a smartphone and as a desktop. Returns (table, note).
 
     sessions  optional {"Smartphone": session, "Desktop": session} to reuse across many pages"""
-    sessions = sessions or device_sessions(as_googlebot)
+    sessions = sessions or device_sessions(as_googlebot, 2, settings)
     rows = {}
     for name in ("Smartphone", "Desktop"):
         rows[name] = core.audit_url(sessions[name], url, settings["timeout"], 0, robots, None)
@@ -660,7 +662,7 @@ def audit_page(session, url: str, settings: dict, keyword: str = "", check_links
                check_targets: bool = True, mobile: str = "googlebot", on_step=None) -> dict:
     """mobile: "googlebot", "chrome" or "" (skip the mobile versus desktop comparison)."""
     step = on_step or (lambda text: None)
-    robots = core.RobotsCache()
+    robots = core.RobotsCache(settings.get("robots_agent", core.ROBOTS_AGENT))
     step("Reading the page")
     row = core.audit_url(session, url, settings["timeout"], 0, robots, {"links": True, "text": True, "keep_html": True})
     x = row["_x"]
@@ -716,7 +718,7 @@ def row_hook(score: bool = True, mobile: str = "", settings: dict = None, robots
     """
     if not score and not mobile:
         return {}
-    sessions = device_sessions(mobile == "googlebot", (settings or {}).get("workers", 4)) if mobile else None
+    sessions = device_sessions(mobile == "googlebot", (settings or {}).get("workers", 4), settings) if mobile else None
 
     def after(row: dict):
         x = row["_x"]
@@ -827,7 +829,7 @@ def page_excel_bytes(audit: dict, comparison: dict = None) -> bytes:
     if comparison:
         sheets += [("Competitors", comparison["table"]), ("Content gaps", comparison["gaps"]),
                    ("Competitor H2s", comparison["h2s"])]
-    sheets.append(("All page data", audit["df"].drop(columns=["_issues"])))
+    sheets.append(("All page data", core.visible(audit["df"])))
     return checks.simple_excel("Page audit", {"URL": audit["url"], "Keyword": audit["keyword"] or "None"}, numbers, sheets)
 
 

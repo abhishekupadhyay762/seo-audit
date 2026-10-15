@@ -30,7 +30,7 @@ LINK = st.column_config.LinkColumn
 
 
 def run(keyword: str, yours: str, comps: list, settings: dict):
-    session = core.make_session(settings["workers"], settings["user_agent"])
+    session = ui.session(settings)
     pages = ([("Your page", yours)] if yours else []) + [(f"Competitor {i}", u) for i, u in enumerate(comps, 1)]
     audits = {}
     with st.status("Reading the pages", expanded=True) as status:
@@ -152,22 +152,24 @@ def main():
                                   help="The pages ranking on the first page of Google for the keyword.")
         go = st.button("Compare pages", type="primary")
 
-    if go:
-        mine = core.normalize_url(yours) if core.looks_like_url(yours) else ""
-        comps = []
-        for line in comps_text.splitlines():
-            u = core.normalize_url(line) if core.looks_like_url(line) else ""
-            if u and u not in comps and core.norm_url(u) != core.norm_url(mine or "-"):
-                comps.append(u)
-        if yours.strip() and not mine:
-            st.warning("Your page URL does not look like a web address. Enter the full address, or leave it empty.")
-        elif not comps:
-            st.warning("Add at least one competitor URL.")
-        else:
-            if len(comps) > content.MAX_COMPETITORS:
-                st.info(f"Only the first {content.MAX_COMPETITORS} competitor URLs are compared.")
-                comps = comps[: content.MAX_COMPETITORS]
-            run(keyword.strip(), mine, comps, settings)
+    work = st.container()  # progress and messages go here, so the results below keep their place
+    with work:
+        if go:
+            mine = core.normalize_url(yours) if core.looks_like_url(yours) else ""
+            comps = []
+            for line in comps_text.splitlines():
+                u = core.normalize_url(line) if core.looks_like_url(line) else ""
+                if u and u not in comps and core.norm_url(u) != core.norm_url(mine or "-"):
+                    comps.append(u)
+            if yours.strip() and not mine:
+                st.warning("Your page URL does not look like a web address. Enter the full address, or leave it empty.")
+            elif not comps:
+                st.warning("Add at least one competitor URL.")
+            else:
+                if len(comps) > content.MAX_COMPETITORS:
+                    st.info(f"Only the first {content.MAX_COMPETITORS} competitor URLs are compared.")
+                    comps = comps[: content.MAX_COMPETITORS]
+                run(keyword.strip(), mine, comps, settings)
 
     result = st.session_state.get("cc_result")
     if not result:
