@@ -730,6 +730,17 @@ def _words(el) -> int:
 BLOCK_MARK = "\u00b6"  # marks where a paragraph, heading, list item or cell ends (used for phrase counts)
 _BLOCK_TAGS = ["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "div", "td", "th", "dt", "dd", "blockquote",
                "section", "article", "figcaption", "br", "tr", "button", "label"]
+_INLINE_LINK_PARENTS = ["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "td", "th", "dt", "dd", "blockquote",
+                        "figcaption", "label", "button"]
+
+
+def _has_h1(el) -> bool:
+    return any(h.get_text(" ", strip=True) for h in el.find_all("h1"))
+
+
+def _holds_copy(el) -> bool:
+    """True for a 'menu' element that wrongly wraps the page's H1 and paragraphs (a tag left open, for example)."""
+    return _has_h1(el) and any(len(p.get_text(" ").split()) >= 20 for p in el.find_all("p"))
 
 
 def main_scope(soup):
@@ -741,27 +752,31 @@ def main_scope(soup):
     for t in body(["script", "style", "noscript", "template", "svg", "iframe"]):
         t.decompose()
     full = _words(body)
+    page_h1 = _has_h1(body)
     scope = body.find("main") or body.find(attrs={"role": "main"})
     if scope is None:
         articles = body.find_all("article")
         scope = articles[0] if len(articles) == 1 else None
     if scope is not None and _words(scope) < 30 and full > 200:
         scope = None  # an empty/misused <main>: fall back to the whole body
+    if scope is not None and page_h1 and not _has_h1(scope):
+        scope = None  # a <main> without the page's H1 is usually a menu panel or a widget, not the content
     if scope is None:
         scope = body
     # A tag nested inside one that was already removed is skipped (el.decomposed).
     for el in scope.find_all(["nav", "aside"]):
-        if not el.decomposed:
+        if not el.decomposed and not _holds_copy(el):
             el.decompose()
     for el in scope.find_all(["header", "footer"]):
-        # only the site header/footer - an article's own <header> holds its H1 and intro
-        if not el.decomposed and el.find_parent(["article", "section", "main"]) is None:
+        # only the site header/footer - an article's own <header>, or a page header holding the H1, stays
+        if not el.decomposed and el.find_parent(["article", "section", "main"]) is None \
+                and not (page_h1 and _has_h1(el)):
             el.decompose()
     for el in scope.find_all(attrs={"role": True}):
-        if not el.decomposed and str(el.get("role")).lower() in _CHROME_ROLES:
+        if not el.decomposed and str(el.get("role")).lower() in _CHROME_ROLES and not _holds_copy(el):
             el.decompose()
     for el in scope.find_all(id=True):
-        if not el.decomposed and str(el.get("id")).lower() in _CHROME_IDS:
+        if not el.decomposed and str(el.get("id")).lower() in _CHROME_IDS and not _holds_copy(el):
             el.decompose()
     return scope, full
 
@@ -776,6 +791,9 @@ def word_counts(soup):
         return 0, 0, "", ""
     for el in scope.find_all(_BLOCK_TAGS):
         el.append(BLOCK_MARK)
+    for el in scope.find_all("a"):  # a link standing on its own (menus, footers) is a block too
+        if el.find_parent(_INLINE_LINK_PARENTS) is None:
+            el.append(BLOCK_MARK)
     marked = scope.get_text(" ")
     text = clean(marked.replace(BLOCK_MARK, " "))
     return len(text.split()), full, text, clean(marked)
@@ -1096,8 +1114,8 @@ def extract(body: bytes, headers, final_url: str, row: dict, opts: dict = None):
     js_rendered = "Likely" if (words_full < 60 and shell) else "No"
     if opts.get("text"):
         x["main_text"] = main_text
-        if opts.get("keep_html"):
-            x["main_text_marked"] = marked_text  # only the page audit uses it
+        if opts.get("keep_html") or opts.get("marked"):
+            x["main_text_marked"] = marked_text  # the page audit and the duplicate check use it
         x["h2s"] = h2s
 
     row.update({

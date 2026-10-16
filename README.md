@@ -134,4 +134,5 @@ the app redeploys by itself. If it shows an error after an update, open Manage a
 - Limits and thresholds: the settings block at the top of `seo_core.py`, `seo_crawl.py` and `seo_checks.py`
   (for example the 200 KB large-image limit in `seo_crawl.py` and the 115-character URL limit in `seo_core.py`)
 - Page audit score weights, grades and schema field rules: the top of `seo_page.py`
-- Duplicate threshold and link score: the top of `seo_tech.py`; the list of AI crawlers: `BOTS` in `seo_tech.py`
+- Duplicate threshold, the template filter (short text repeated on many pages is left out before comparing) and
+  link score: the top of `seo_tech.py`; the list of AI crawlers: `BOTS` in `seo_tech.py`

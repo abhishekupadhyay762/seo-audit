@@ -20,7 +20,8 @@ COVERS = [
     ("Groups to fix", "Copies grouped together, with the page to keep and what to do with the others."),
     ("Handled already", "Groups where only one page is indexable (the rest canonicalise to it or are noindex)."),
     ("Repeated titles, H1s and metas", "The same title, H1 or meta description on more than one page."),
-    ("Main content only", "Menus, header, footer and sidebars are left out, so a shared template does not count."),
+    ("Each page's own text only", "Menus, header, footer, sidebars and short text repeated across the site (form "
+                                  "labels, buttons, link lists) are left out, so a shared template does not count."),
 ]
 
 

@@ -32,6 +32,8 @@ import seo_report as report
 DUP_THRESHOLD = 90           # default similarity (%) for near-duplicates
 DUP_MIN_WORDS = 50           # pages with fewer main-content words are not compared (too short to judge)
 DUP_SHINGLE = 3              # words per shingle
+DUP_TEMPLATE_SHARE = 25      # short text blocks (under 12 words) found on this % of the pages or more are site template
+DUP_TEMPLATE_MIN_PAGES = 20  # ... worked out only when at least this many pages are compared
 MAX_MATCHES = 50             # most values kept per extraction rule and page
 LINK_SCORE_DAMPING = 0.85
 
@@ -61,18 +63,75 @@ def signature(words: list):
     return ((_A[:, None] * h[None, :] + _B[:, None]) % _PRIME).min(axis=1)
 
 
+def _blocks(marked: str):
+    """(text, content words) for each block of the marked main text that has words."""
+    for block in marked.split(core.BLOCK_MARK):
+        w = page.content_words(block)
+        if w:
+            yield block, w
+
+
+def _block_key(words: list) -> int:
+    return int.from_bytes(hashlib.blake2b(" ".join(words).encode("utf-8"), digest_size=8).digest(), "little")
+
+
 def duplicate_hook() -> dict:
-    """Page-check options that keep a fingerprint of each page's main content (and drop the text)."""
+    """Page-check options that keep each page's main text and a fingerprint of each text block (and drop the rest)."""
     def after(row: dict):
         x = row["_x"]
         try:
             if x.get("parsed"):
-                words = page.content_words(x.get("main_text", ""))
-                x["dup"] = {"hash": hashlib.md5(" ".join(words).encode("utf-8")).hexdigest() if words else "",
-                            "sig": signature(words) if len(words) >= DUP_MIN_WORDS else None, "words": len(words)}
+                marked = x.get("main_text_marked") or x.get("main_text", "")
+                sizes, keys = [], []
+                for _, w in _blocks(marked):
+                    sizes.append(len(w))
+                    keys.append(_block_key(w))
+                x["dup"] = {"marked": marked, "sizes": np.array(sizes, dtype=np.int32),
+                            "keys": np.array(keys, dtype=np.uint64)}
         finally:
             _drop(x, "main_text", "intro_text", "h2s")
-    return {"text": True, "after": after}
+    return {"text": True, "marked": True, "after": after}
+
+
+_TEMPLATE_MAX_WORDS = 12
+
+
+def _template_blocks(rows: list, ok: list) -> set:
+    """Short text blocks that repeat on a large share of the pages: menus, footers, form labels, buttons,
+    'why choose us' points and blog teasers, whatever tags the site uses. Long paragraphs are never counted
+    as template, so pages that really copy each other's paragraphs are still found."""
+    if len(ok) < DUP_TEMPLATE_MIN_PAGES:
+        return set()
+    need = max(5, int(np.ceil(len(ok) * DUP_TEMPLATE_SHARE / 100)))
+    counts, short = {}, set()
+    for i in ok:
+        d = rows[i]["_x"]["dup"]
+        for k, n in zip(d["keys"].tolist(), d["sizes"].tolist()):
+            if n < _TEMPLATE_MAX_WORDS:
+                short.add(k)
+        for k in set(d["keys"].tolist()):
+            counts[k] = counts.get(k, 0) + 1
+    return {k for k, c in counts.items() if c >= need and k in short}
+
+
+def _prepare(rows: list, ok: list):
+    """Works out each page's own text (template blocks left out): its hash, signature, word count and start."""
+    template = _template_blocks(rows, ok)
+    tag = hash(frozenset(template))
+    for i in ok:
+        d = rows[i]["_x"]["dup"]
+        if d.get("tag") == tag or "marked" not in d:
+            continue  # worked out already (a new run with another threshold)
+        words, text = [], []
+        for (block, w), k in zip(_blocks(d.pop("marked")), d["keys"].tolist()):
+            if k not in template:
+                words.extend(w)
+                if len(text) < 40:
+                    text.extend(block.split()[:40])
+        d.update({"tag": tag, "words": len(words), "start": " ".join(text[:30]),
+                  "hash": hashlib.md5(" ".join(words).encode("utf-8")).hexdigest() if words else "",
+                  "sig": signature(words) if len(words) >= DUP_MIN_WORDS else None})
+    return len(template)
 
 
 class _Groups:
@@ -154,6 +213,7 @@ def find_duplicates(rows: list, threshold: int = DUP_THRESHOLD) -> dict:
                                                                                 "Near-duplicate content"))]
     ok = [i for i, r in enumerate(rows)
           if r["_x"].get("dup") and r["Final Status Code"] == 200 and not r["Redirect Hops"]]
+    template_blocks = _prepare(rows, ok)
     groups = _Groups(len(rows))
     best = {}  # row -> (similarity, other row)
     pair_sims = {}
@@ -285,10 +345,11 @@ def find_duplicates(rows: list, threshold: int = DUP_THRESHOLD) -> dict:
             return max(same_counts[col].get(v, 0) - 1, 0) if v and i in ok else 0
         page_rows.append({
             "URL": r["URL"], "Status": r["Final Status Code"], "Indexable": r["Indexable"],
-            "Words": d["words"] if d else None, "Group": group_of.get(i), "Exact Duplicates": n_exact,
+            "Words": d.get("words") if d and i in ok else None, "Group": group_of.get(i), "Exact Duplicates": n_exact,
             "Near Duplicates": n_near, "Closest Match": r["Closest Match"], "Similarity (%)": r["Similarity (%)"],
             "Same Title As": same("Title"), "Same H1 As": same("H1"), "Same Meta As": same("Meta Description"),
             "Canonical Status": r["Canonical Status"], "Title": r["Title"],
+            "Text Compared (start)": d.get("start", "") if d and i in ok else "",
             "Note": "" if i in ok else (r["Fetch Error"] or f"Not compared (status {r['Final Status Code']})"),
         })
     pages_df = pd.DataFrame(page_rows)
@@ -296,16 +357,11 @@ def find_duplicates(rows: list, threshold: int = DUP_THRESHOLD) -> dict:
         pages_df[c] = pd.array(pages_df[c].tolist(), dtype="Int64")
     pairs = []
     for (i, j), sim in sorted(pair_sims.items(), key=lambda kv: -kv[1]):
-        pairs.append({"Page": rows[i]["URL"], "Similar Page": rows[j]["URL"], "Similarity (%)": int(round(sim * 100)),
-                      "Words": rows[i]["_x"]["dup"]["words"], "Similar Page Words": rows[j]["_x"]["dup"]["words"],
-                      "Both Indexable": "Yes" if rows[i]["Indexable"] == rows[j]["Indexable"] == "Yes" else "No"})
+        pairs.append(_pair_row(rows, i, j, int(round(sim * 100))))
     for members in {tuple(m) for m in exact_of.values()}:
         for j in members[1:]:
-            pairs.append({"Page": rows[members[0]]["URL"], "Similar Page": rows[j]["URL"], "Similarity (%)": 100,
-                          "Words": rows[members[0]]["_x"]["dup"]["words"], "Similar Page Words": rows[j]["_x"]["dup"]["words"],
-                          "Both Indexable": "Yes" if rows[members[0]]["Indexable"] == rows[j]["Indexable"] == "Yes" else "No"})
-    pairs_df = pd.DataFrame(pairs, columns=["Page", "Similar Page", "Similarity (%)", "Words", "Similar Page Words",
-                                            "Both Indexable"]).sort_values("Similarity (%)", ascending=False)
+            pairs.append(_pair_row(rows, members[0], j, 100))
+    pairs_df = pd.DataFrame(pairs, columns=PAIR_COLUMNS).sort_values("Similarity (%)", ascending=False, kind="stable")
     groups_df = pd.DataFrame(group_rows, columns=["Group", "Type", "Pages", "Indexable", "Similarity (%)",
                                                   "Suggested Page To Keep", "Action", "URLs"])
     compared = len([i for i in ok if rows[i]["_x"]["dup"]["sig"] is not None])
@@ -316,7 +372,19 @@ def find_duplicates(rows: list, threshold: int = DUP_THRESHOLD) -> dict:
                "Repeated titles": int((rep_df["Element"] == "Title").sum()) if len(rep_df) else 0,
                "Too short to compare": len(ok) - compared}
     return {"pages": pages_df, "groups": groups_df, "pairs": pairs_df.reset_index(drop=True), "repeats": rep_df,
-            "numbers": numbers, "threshold": threshold}
+            "numbers": numbers, "threshold": threshold, "template_blocks": template_blocks}
+
+
+PAIR_COLUMNS = ["Page", "Similar Page", "Similarity (%)", "Words", "Similar Page Words", "Both Indexable",
+                "Page Text Compared (start)", "Similar Page Text Compared (start)"]
+
+
+def _pair_row(rows: list, i: int, j: int, sim: int) -> dict:
+    a, b = rows[i]["_x"]["dup"], rows[j]["_x"]["dup"]
+    return {"Page": rows[i]["URL"], "Similar Page": rows[j]["URL"], "Similarity (%)": sim,
+            "Words": a["words"], "Similar Page Words": b["words"],
+            "Both Indexable": "Yes" if rows[i]["Indexable"] == rows[j]["Indexable"] == "Yes" else "No",
+            "Page Text Compared (start)": a["start"], "Similar Page Text Compared (start)": b["start"]}
 
 
 def duplicates_excel(result: dict, info: dict) -> bytes:

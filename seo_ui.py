@@ -934,15 +934,20 @@ def duplicates_view(result: dict, prefix: str, file_stem: str, info: dict, note:
                          column_config={"Suggested Page To Keep": link("Suggested Page To Keep", width="medium"),
                                         "Action": st.column_config.TextColumn(width="large"),
                                         "URLs": st.column_config.TextColumn(width="large")})
-            st.caption("Pages in a group are compared on their main content. The page to keep is the one the others "
-                       "already canonicalise to, else the shortest indexable address.")
+            st.caption("Pages in a group are compared on their own text: menus, header, footer and short text found on "
+                       "many pages (form labels, buttons, 'why choose us' points) are left out. The page to keep is the "
+                       "one the others already canonicalise to, else the shortest indexable address.")
     with tabs[1]:
         if pairs.empty:
             st.info("No similar pairs.")
         else:
             st.dataframe(pairs, width="stretch", hide_index=True, height=table_height(len(pairs), 460),
                          column_config={"Page": link("Page", pinned=True, width="medium"),
-                                        "Similar Page": link("Similar Page", width="medium")})
+                                        "Similar Page": link("Similar Page", width="medium"),
+                                        "Page Text Compared (start)": st.column_config.TextColumn(width="large"),
+                                        "Similar Page Text Compared (start)": st.column_config.TextColumn(width="large")})
+            st.caption("The two Text Compared columns show how each page's compared text starts. If both start with "
+                       "menu or form text, the page's own copy may be added by JavaScript, which this check cannot read.")
     with tabs[2]:
         if repeats.empty:
             st.success("No title, H1 or meta description is used on more than one page.")
@@ -952,7 +957,8 @@ def duplicates_view(result: dict, prefix: str, file_stem: str, info: dict, note:
                                         "URLs": st.column_config.TextColumn(width="large")})
     with tabs[3]:
         st.dataframe(pages, width="stretch", hide_index=True, height=table_height(len(pages), 460),
-                     column_config={"URL": link("URL", pinned=True, width="medium"), "Closest Match": link("Closest Match")})
+                     column_config={"URL": link("URL", pinned=True, width="medium"), "Closest Match": link("Closest Match"),
+                                    "Text Compared (start)": st.column_config.TextColumn(width="large")})
     if note:
         st.caption(note)
     row = st.container(horizontal=True)
